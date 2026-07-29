@@ -25,6 +25,15 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 MAX_PASSES=8
 BACKOFF=300   # seconds between retry passes (rate-limit cool-off)
 
+# Deep chunks are big, and the claude-cli backend answers slowly on them.
+# graphify's default API timeout is 600s; a chunk that exceeds it is lost and
+# the whole run lands PARTIAL, which the node-count guard then (correctly)
+# refuses to write. Observed 2026-07-29: chunk 23/26 timed out, the run produced
+# 3341 nodes against an existing 14647, and graphify refused to overwrite.
+# Raise the ceiling, but never override a value the user set deliberately.
+export GRAPHIFY_API_TIMEOUT="${GRAPHIFY_API_TIMEOUT:-1800}"
+
+
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 mkdir -p "$LOGDIR"

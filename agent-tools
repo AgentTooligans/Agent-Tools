@@ -1454,6 +1454,14 @@ refresh() {
         c_warn "Its cache namespace starts EMPTY, so the first run re-reads everything."
         c_warn "~$ndocs markdown files here. On a large corpus this runs for hours —"
         c_warn "for that, use scripts/graphify-full-run.sh (detached, retries, resumes)."
+        # Deep chunks are big, and the claude-cli backend answers slowly on them.
+        # graphify's default API timeout is 600s; a chunk that exceeds it is lost and
+        # the whole run lands PARTIAL, which the node-count guard then (correctly)
+        # refuses to write. Observed 2026-07-29: chunk 23/26 timed out, the run produced
+        # 3341 nodes against an existing 14647, and graphify refused to overwrite.
+        # Raise the ceiling, but never override a value the user set deliberately.
+        export GRAPHIFY_API_TIMEOUT="${GRAPHIFY_API_TIMEOUT:-1800}"
+        c_warn "API timeout for this run: ${GRAPHIFY_API_TIMEOUT}s per chunk"
         graphify extract . --backend claude-cli --mode deep || exit 1 ;;
       *)
         graphify extract . --backend claude-cli || exit 1 ;;
