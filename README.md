@@ -248,6 +248,7 @@ over 2,000 characters as a likely pasted log. **It never edits your file.**
 | [docs/UPDATING.md](docs/UPDATING.md) | `agent-tools update`, per-component upgrade steps, and why upgrading graphify can cost hours |
 | [docs/CAVEMAN.md](docs/CAVEMAN.md) | the output-compression skill: why it is default, its levels, and the nuance it costs |
 | [docs/AGENTS.md](docs/AGENTS.md) | Codex, Cursor, Gemini CLI, Copilot and friends |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | moving to another computer: every out-of-repo path, what to copy vs reinstall, and rotating API keys |
 | [docs/PLATFORMS.md](docs/PLATFORMS.md) | support matrix, verification status, WSL traps |
 | [docs/GRAPH-HYGIENE.md](docs/GRAPH-HYGIENE.md) | keeping a graph honest: the graph is flat in time, so scope + status banners are the only levers; duplicate/oversize/stale failure modes |
 | [docs/WHY.md](docs/WHY.md) | the incident record behind every default |

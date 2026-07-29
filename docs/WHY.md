@@ -27,11 +27,19 @@ when you want to know why a rule is a rule.
 | **Memory data** | 0 sessions, 0 observations | manual copy — see §3 |
 | **API keys** | LLM backends unavailable | manual — see §4 |
 
-`.graphify_python` is **checked into the repo** while `graphify-out/` is otherwise
-gitignored, so a stale absolute path travels with the repo to every new machine.
+`.graphify_python` and `.graphify_root` pin **absolute** machine-specific paths.
+They were once committed alongside an otherwise-gitignored `graphify-out/`, so a
+stale interpreter path travelled with the repo — which is exactly what broke
+graphify in the 2026-07-28 move. **They are now deliberately gitignored** and
+each machine writes its own. Verified 2026-07-29: 0 tracked in every repo here.
 
-`.git/hooks/` is **never version controlled**, so the post-commit hook must be
-reinstalled per machine — that is what `setup-dev-machine.sh` is for.
+`.git/hooks/` is **never version controlled**, so the post-commit and
+post-checkout hooks must be reinstalled per machine — that is what
+`agent-tools init` does.
+
+**Procedure, as opposed to this incident record:** [MIGRATION.md](MIGRATION.md)
+lists every out-of-repo path, what to copy, what to reinstall, and how to rotate
+keys.
 
 ---
 
