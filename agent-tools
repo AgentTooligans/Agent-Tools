@@ -709,6 +709,17 @@ doctor() {
         [ -f "$root/graphify-out/graph.json" ] && c_ok "graph: $(graph_stats)" || c_warn "no graph — run: agent-tools init"
         grep -q '"graphify hook-guard' "$root/.claude/settings.json" 2>/dev/null \
             && c_ok "hook-guard wired (portable form)" || c_warn "no hook-guard in .claude/settings.json"
+        # `graphify claude install` writes its own "## graphify" section. We write
+        # a managed block that already covers it, so running both leaves CLAUDE.md
+        # saying the same thing twice -- in the very file we ask to keep lean.
+        for _instr in "$root/CLAUDE.md" "$root/AGENTS.md"; do
+            [ -f "$_instr" ] || continue
+            if grep -q "agent-tools:managed" "$_instr" 2>/dev/null \
+               && grep -q "^## graphify$" "$_instr" 2>/dev/null; then
+                c_warn "$(basename "$_instr") has BOTH graphify's own section and ours"
+                echo "        graphify claude uninstall   # drops its section (keeps our hook-guard)"
+            fi
+        done
         if [ -f "$root/.git/hooks/post-commit" ] && grep -q graphify "$root/.git/hooks/post-commit" 2>/dev/null; then
             [ -f "$root/.git/graphify-auto-update-ENABLED" ] && c_warn "auto-update ENABLED" || c_ok "auto-update installed, disabled (default)"
         else c_warn "no post-commit hook"; fi
@@ -931,8 +942,20 @@ PY
 REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 ENABLE="$REPO/.git/graphify-auto-update-ENABLED"; LOG="$REPO/.git/graphify-auto-update.log"
 [ -f "$ENABLE" ] || exit 0
+# Skip mid-rebase/merge/cherry-pick: a 20-commit rebase would otherwise fire 20
+# rebuilds, and an unstaged graphify-out/ blocks `git rebase --continue`.
+GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
+[ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] && exit 0
+[ -f "$GIT_DIR/MERGE_HEAD" ] || [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
+# Concurrency guard. Deliberately GLOBAL, not repo-scoped: reading another
+# process's cwd needs /proc (Linux) or lsof (macOS) and is not portable. A run
+# in another repo therefore suppresses this one -- conservative, but it must not
+# be SILENT, or the graph quietly stops updating and nobody knows why.
 if command -v pgrep >/dev/null 2>&1; then
-  pgrep -f "graphify (extract|update|label|cluster-only|watch)" >/dev/null 2>&1 && exit 0
+  if pgrep -f "graphif[y] (extract|update|label|cluster-only|watch)" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] skipped: another graphify run is in flight" >> "$LOG"
+    exit 0
+  fi
 fi
 GRAPHIFY="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
 [ -x "$GRAPHIFY" ] || exit 0
@@ -943,6 +966,45 @@ HK
         chmod +x .git/hooks/post-commit
         c_ok "post-commit hook installed (DISABLED by default)"
     else c_ok "post-commit hook already present"; fi
+
+    # Branch switches change code wholesale, so a graph built on the old branch
+    # is stale until the next commit. graphify ships its own post-checkout hook,
+    # but `graphify hook install` also writes `.gitattributes` -- a COMMITTED
+    # file -- registering a merge driver that only exists in the local
+    # .git/config, by absolute path. Teammates would inherit a merge=graphify
+    # attribute pointing at a driver they do not have. So we install the useful
+    # half ourselves, behind the same opt-in gate.
+    if [ ! -f .git/hooks/post-checkout ] || ! grep -q graphify .git/hooks/post-checkout 2>/dev/null; then
+        cat > .git/hooks/post-checkout <<'HK'
+#!/bin/bash
+# graphify auto-update on branch switch — code only (AST, no LLM, no cost).
+# OPT-IN: absent gate file == disabled. Same gate as post-commit.
+[ "$3" = "1" ] || exit 0                      # $3=1 means branch switch, not file checkout
+REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+ENABLE="$REPO/.git/graphify-auto-update-ENABLED"; LOG="$REPO/.git/graphify-auto-update.log"
+[ -f "$ENABLE" ] || exit 0
+[ -d "$REPO/graphify-out" ] || exit 0         # never build a graph from scratch here
+GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
+[ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] && exit 0
+# Concurrency guard. Deliberately GLOBAL, not repo-scoped: reading another
+# process's cwd needs /proc (Linux) or lsof (macOS) and is not portable. A run
+# in another repo therefore suppresses this one -- conservative, but it must not
+# be SILENT, or the graph quietly stops updating and nobody knows why.
+if command -v pgrep >/dev/null 2>&1; then
+  if pgrep -f "graphif[y] (extract|update|label|cluster-only|watch)" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] skipped: another graphify run is in flight" >> "$LOG"
+    exit 0
+  fi
+fi
+GRAPHIFY="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
+[ -x "$GRAPHIFY" ] || exit 0
+( cd "$REPO" && echo "[$(date '+%F %T')] checkout $(git rev-parse --abbrev-ref HEAD)" >> "$LOG" \
+  && "$GRAPHIFY" update . >> "$LOG" 2>&1 ) >/dev/null 2>&1 &
+exit 0
+HK
+        chmod +x .git/hooks/post-checkout
+        c_ok "post-checkout hook installed (DISABLED by default)"
+    else c_ok "post-checkout hook already present"; fi
 
     if have claude; then
         local gmcp; gmcp="$(command -v graphify-mcp || echo "$BIN/graphify-mcp")"
@@ -980,6 +1042,14 @@ HK
     local instr=""
     for f in CLAUDE.md AGENTS.md .cursorrules; do [ -f "$f" ] && { instr="$f"; break; }; done
     [ -z "$instr" ] && instr="AGENTS.md"
+    # `graphify claude install` writes its own "## graphify" section covering the
+    # same ground. We do not call it (our block is a superset and stays portable),
+    # but a user who ran it by hand ends up with both -- duplicate instructions in
+    # the one file we ask to keep lean. Say so rather than quietly stacking.
+    if grep -q "^## graphify$" "$instr" 2>/dev/null; then
+        c_warn "$instr already has graphify's own section; ours repeats it"
+        c_warn "    graphify claude uninstall   # then re-run: agent-tools init"
+    fi
     if grep -q "agent-tools:managed" "$instr" 2>/dev/null; then
         c_ok "agent instructions already in $instr"
     elif confirm "a short 'use the graph and memory' section in $instr"; then
@@ -993,6 +1063,11 @@ Before grepping or reading files broadly, ask the graph:
     graphify query "<question>"        # scoped subgraph, cheap
     graphify affected "<symbol>"       # blast radius before refactoring
     graphify god-nodes                 # what is risky to touch at all
+    graphify path "<A>" "<B>"          # how two things connect
+    graphify explain "<concept>"       # one concept, focused
+
+If graphify-out/wiki/index.md exists, use it to navigate broadly. Read
+GRAPH_REPORT.md only for whole-architecture review — it is large.
 
 The graph covers code structure, docs and concepts. It does NOT index
 string-level details (CSS variables, literals) — use grep for those.

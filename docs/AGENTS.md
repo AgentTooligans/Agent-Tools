@@ -120,6 +120,42 @@ It wires **Claude Code** (`claude mcp add ... -s local`) because that is what it
 can verify. For any other host, run the `connect` / `install` commands above —
 they are one-liners, and both tools are already installed and running.
 
+### Why it does not call `graphify claude install` or `graphify hook install`
+
+Both commands exist and both do something real. `init` deliberately writes its
+own equivalents instead, for reasons worth knowing before you "simplify" this:
+
+**`graphify claude install`** — writes a `## graphify` section to CLAUDE.md plus
+the PreToolUse hook-guard. `init` writes the same hook (identical
+`graphify hook-guard` commands, in the portable bare form) inside a managed block
+that *also* covers memory and the keep-this-file-lean rule. Running both leaves
+CLAUDE.md saying the same thing twice — in the very file we ask to keep lean.
+`doctor` now flags that; the fix is `graphify claude uninstall`, which drops its
+section while `init` restores the hook.
+
+**`graphify hook install`** — installs post-commit and post-checkout git hooks
+that rebuild the code graph (AST only, no LLM) in a detached process. Genuinely
+useful, and `init` now installs both. It is not delegated because that command
+also **writes `.gitattributes`** — a *committed* file — registering
+`graphify-out/graph.json merge=graphify`, where the driver itself is defined only
+in the local `.git/config` by absolute path. Commit that and every teammate
+inherits an attribute pointing at a merge driver they do not have.
+
+Two other differences in our copies:
+
+- **Opt-in, fail-closed.** Both hooks exit unless
+  `.git/graphify-auto-update-ENABLED` exists. graphify's fire unconditionally.
+  This started as opt-out, the sentinel vanished, and the hook silently
+  re-enabled itself — hence the inversion.
+- **The concurrency skip is logged.** Both hooks skip when another graphify run
+  is in flight. That guard is global, not repo-scoped (reading another process's
+  cwd needs `/proc` or `lsof`), so a long run in one repo suppresses rebuilds
+  everywhere. It writes "skipped: another graphify run is in flight" to
+  `.git/graphify-auto-update.log` rather than doing nothing quietly.
+
+To use graphify's versions instead, run `graphify hook install` and then decide
+what to do about the `.gitattributes` line it leaves in your working tree.
+
 The graph itself is host-neutral: `graphify-out/` is just files. Any number of
 agents can read the same graph, and the memory server serves all of them from
 one place on port 3111.
