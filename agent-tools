@@ -87,9 +87,11 @@ AT_CONFIG_DIR="$HOME/.config/agent-tools"
 AT_CONFIG="$AT_CONFIG_DIR/config"
 MEMORY_DEFAULT="claude-mem"
 MEMORY_BACKEND=""
+SKIP_CAVEMAN=0
 for _a in "$@"; do
     case "$_a" in
         --memory=*) MEMORY_BACKEND="${_a#--memory=}" ;;
+        --no-caveman) SKIP_CAVEMAN=1 ;;
     esac
 done
 if [ -z "$MEMORY_BACKEND" ] && [ -f "$AT_CONFIG" ]; then
@@ -284,6 +286,8 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
   agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
   agent-tools obsidian DIR      export graph + memories into an Obsidian vault
+  agent-tools caveman [CMD]    output-token compression: status|install|update|uninstall
+  agent-tools update [WHAT]    update all|graphify|memory|caveman|self
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -302,6 +306,7 @@ Memory backend (install-machine):
   Your choice is remembered in ~/.config/agent-tools/config.
 
 Flags (install-machine):
+  --no-caveman          skip the caveman output-compression skill
   -y, --yes       install everything missing without asking (CI / unattended)
       --no-install  never install; just report what is missing
   default         ask before each install; skips (never hangs) when
@@ -666,6 +671,22 @@ doctor() {
       none) c_warn "no memory backend selected (--memory=none)" ;;
     esac
 
+    hdr "caveman (output compression)"
+    if caveman_installed; then
+        local _lvl; _lvl="$(caveman_level)"
+        if [ -n "$_lvl" ]; then
+            c_ok "installed and ACTIVE at level '$_lvl'"
+            echo "        replies compress from message one; /caveman off to stop"
+        else
+            c_ok "installed, currently off (/caveman to switch on)"
+        fi
+        [ -d "$HOME/.agents/skills/caveman" ] \
+            && c_ok "global skills present (all agents)" \
+            || c_warn "no global skills — non-Claude agents lack it: agent-tools caveman install"
+    else
+        c_warn "caveman not installed — agent-tools caveman install"
+    fi
+
     if [ "$MEMORY_BACKEND" = agentmemory ] && [ "$PLATFORM" != windows ]; then
         hdr "Memory server"
         if curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
@@ -731,6 +752,191 @@ doctor() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# caveman — output-token compression (https://github.com/JuliusBrussee/caveman)
+#
+# WHY IT IS PART OF THE DEFAULT INSTALL
+#   graphify cuts INPUT tokens (ask the graph instead of reading ten files) and
+#   the memory backend cuts re-derivation. Neither touches what the agent SAYS
+#   BACK, which on a long session is a large share of the spend. caveman is the
+#   third leg: a skill telling the agent to drop filler and pleasantries while
+#   keeping technical substance and code verbatim. Upstream measures ~65% fewer
+#   output tokens; treat that as their number, not ours.
+#
+#   It is also the cheapest thing here to reverse: it is instructions, not a
+#   service. Nothing runs in the background, and turning it off is one command.
+#
+# WHAT GETS INSTALLED, AND WHY IN TWO STEPS
+#   1. caveman's own installer -> the Claude Code PLUGIN (~/.claude/plugins),
+#      whose manifest wires SessionStart + UserPromptSubmit hooks. Those hooks
+#      are what make it apply from message one rather than only after you type
+#      /caveman.
+#   2. `skills add -g` -> ~/.agents/skills/caveman*, symlinked into every other
+#      agent's directory (Codex, Cursor, Gemini, Continue, ...).
+#
+#   Step 2 is NOT redundant. caveman's installer does not pass `-g`, so for
+#   non-Claude agents it installs PROJECT-scoped into $PWD/.agents/skills --
+#   verified 2026-07-29, it dropped skills into the current directory. Run from
+#   a temp dir the install evaporates; run from a repo it litters the repo.
+#   Hence: always from a neutral directory, and global scope explicitly.
+# ---------------------------------------------------------------------------
+CAVEMAN_REPO="JuliusBrussee/caveman"
+
+caveman_level() {          # active level, or empty when off
+    local f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-active"
+    [ -f "$f" ] && tr -d '[:space:]' < "$f" 2>/dev/null
+}
+
+caveman_installed() {
+    [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/caveman" ] \
+        || [ -d "$HOME/.agents/skills/caveman" ]
+}
+
+install_caveman() {
+    hdr "caveman (output-token compression)"
+    if [ "$SKIP_CAVEMAN" = 1 ]; then c_warn "skipped (--no-caveman)"; return 0; fi
+    if ! node_ok; then
+        c_warn "needs Node >= 18 — skipping caveman (everything else still works)"
+        return 0
+    fi
+    if caveman_installed && [ "$ASSUME_YES" = 0 ] && [ "$NO_INSTALL" = 1 ]; then
+        c_ok "caveman already installed (left as-is)"; return 0
+    fi
+    caveman_installed || confirm "caveman (fewer output tokens; instructions only, no service)" || return 0
+
+    # Run from a directory we do not care about: the upstream installer writes
+    # $PWD/.agents/skills for non-Claude agents.
+    local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+    ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --non-interactive >/dev/null 2>&1 ) \
+        && c_ok "caveman installed for Claude Code (plugin + session hooks)" \
+        || c_warn "caveman plugin install failed (network? Node?)"
+
+    # Global, cross-agent. Eve and PromptScript reject global scope by design;
+    # that is their limitation and not an error worth surfacing.
+    ( cd "$neutral" && npx -y skills add "$CAVEMAN_REPO" --skill '*' --agent '*' -g -y >/dev/null 2>&1 ) \
+        && c_ok "caveman skills installed globally (~/.agents/skills, all agents)" \
+        || c_warn "global skill install failed — run: npx -y skills add $CAVEMAN_REPO --all -g"
+    [ -d "$neutral" ] && rm -rf "$neutral" 2>/dev/null
+
+    local lvl; lvl="$(caveman_level)"
+    if [ -n "$lvl" ]; then
+        c_ok "caveman is ACTIVE at level '$lvl' — replies compress from message one"
+    else
+        c_ok "installed but idle — run /caveman in a session to switch it on"
+    fi
+    echo "        levels: lite | full | ultra | wenyan     off: /caveman off"
+}
+
+caveman_cmd() {
+    case "${1:-status}" in
+        install) SKIP_CAVEMAN=0; install_caveman ;;
+        status)
+            if caveman_installed; then
+                local lvl; lvl="$(caveman_level)"
+                c_ok "caveman installed${lvl:+ — ACTIVE at level '$lvl'}"
+                [ -z "$lvl" ] && c_ok "currently off"
+                [ -d "$HOME/.agents/skills/caveman" ] && c_ok "global skills: $(ls "$HOME/.agents/skills" 2>/dev/null | grep -c caveman) present"
+                echo
+                echo "  In a session:  /caveman [lite|full|ultra|wenyan]   ·   /caveman off"
+                echo "  Savings:       /caveman-stats  (upstream's estimate, not measured here)"
+            else
+                c_warn "not installed — agent-tools caveman install"
+            fi ;;
+        update|upgrade)
+            node_ok || { c_bad "needs Node >= 18"; return 1; }
+            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+            ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --non-interactive --force >/dev/null 2>&1 ) \
+                && c_ok "caveman plugin updated" || c_warn "plugin update failed"
+            ( cd "$neutral" && npx -y skills update caveman -g -y >/dev/null 2>&1 ) \
+                && c_ok "global caveman skills updated" || c_warn "skill update failed"
+            rm -rf "$neutral" 2>/dev/null ;;
+        uninstall|remove)
+            node_ok || { c_bad "needs Node >= 18"; return 1; }
+            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+            ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --uninstall >/dev/null 2>&1 ) \
+                && c_ok "caveman removed from Claude Code" || c_warn "uninstall reported a problem"
+            ( cd "$neutral" && npx -y skills remove caveman -g -y >/dev/null 2>&1 ) >/dev/null 2>&1
+            rm -rf "$neutral" 2>/dev/null
+            c_ok "done — restart your agent for it to take effect" ;;
+        *) c_bad "usage: agent-tools caveman [status|install|update|uninstall]"; return 2 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Updating. Each component updates differently and some have footguns, so a
+# single command is safer than asking people to remember four incantations.
+#
+#   graphify    MUST be reinstalled with extras + the mcp<2 pin re-specified,
+#               or you silently lose the gemini backend / the MCP server.
+#   claude-mem  its own installer; the worker must be restarted afterwards.
+#   agentmemory npm global, then the service restarted or you keep running the
+#               old binary.
+#   caveman     re-run from GitHub (unpinned) + update the global skills.
+#   self        git pull + install.sh in the Agent-Tools checkout.
+# ---------------------------------------------------------------------------
+update_cmd() {
+    local what="${1:-all}"
+    case "$what" in all|graphify|memory|caveman|self) ;;
+        *) c_bad "usage: agent-tools update [all|graphify|memory|caveman|self]"; return 2 ;;
+    esac
+
+    if [ "$what" = all ] || [ "$what" = graphify ]; then
+        hdr "graphify"
+        if have uv; then
+            c_warn "an upgrade can invalidate the semantic cache (re-extraction costs hours)"
+            uv tool install "graphifyy[gemini,mcp]" --with "mcp<2" --force >/dev/null 2>&1 \
+                && c_ok "graphify $(graphify --version 2>/dev/null | awk '{print $2}')" \
+                || c_bad "graphify update failed"
+        else c_warn "uv not installed — skipping"; fi
+    fi
+
+    if [ "$what" = all ] || [ "$what" = memory ]; then
+        hdr "memory backend ($MEMORY_BACKEND)"
+        case "$MEMORY_BACKEND" in
+          claude-mem)
+            if node_ok; then
+                npx -y claude-mem@latest install >/dev/null 2>&1 \
+                    && c_ok "claude-mem updated" || c_bad "claude-mem update failed"
+                npx claude-mem start >/dev/null 2>&1 \
+                    && c_ok "worker restarted" \
+                    || c_warn "start the worker yourself: npx claude-mem start"
+            else c_warn "needs Node >= $NODE_MIN — skipping"; fi ;;
+          agentmemory)
+            if node_ok; then
+                npm install -g @agentmemory/agentmemory@latest >/dev/null 2>&1 \
+                    && c_ok "agentmemory updated" || c_bad "agentmemory update failed"
+                # The old binary keeps running until the service restarts.
+                # (svc_stop/svc_start, not a restart helper -- there isn't one.)
+                svc_stop >/dev/null 2>&1
+                if svc_start >/dev/null 2>&1; then c_ok "service restarted"
+                else c_warn "restart the service yourself: $(svc_describe)"; fi
+            else c_warn "needs Node >= $NODE_MIN — skipping"; fi ;;
+          none) c_warn "no memory backend selected" ;;
+        esac
+    fi
+
+    if [ "$what" = all ] || [ "$what" = caveman ]; then
+        caveman_installed && { hdr "caveman"; caveman_cmd update; } \
+            || { [ "$what" = caveman ] && c_warn "caveman not installed — agent-tools caveman install"; }
+    fi
+
+    if [ "$what" = all ] || [ "$what" = self ]; then
+        hdr "agent-tools itself"
+        local src; src="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+        if [ -d "$src/.git" ]; then
+            ( cd "$src" && git pull --ff-only >/dev/null 2>&1 && ./install.sh >/dev/null 2>&1 ) \
+                && c_ok "agent-tools updated from $src" \
+                || c_warn "could not update in place — cd $src && git pull && ./install.sh"
+        else
+            c_warn "not running from a git checkout; update manually:"
+            echo "        cd /path/to/Agent-Tools && git pull && ./install.sh"
+        fi
+    fi
+
+    echo
+    c_ok "done — run 'agent-tools doctor' to confirm nothing came loose"
+}
+
 install_machine() {
     hdr "Platform: $PLATFORM"
     [ "$PLATFORM" = windows ] && c_warn "native Windows: graphify only. For agentmemory use WSL2 (upstream)."
@@ -802,6 +1008,7 @@ install_machine() {
               || c_bad "claude-mem install failed — try: npx claude-mem install"
         fi
         remember_backend claude-mem
+        install_caveman
         hdr "Next"
         echo "  cd <your-project> && agent-tools init"
         echo "  claude-mem has NO bulk importer; to replay past sessions see"
@@ -883,6 +1090,7 @@ install_machine() {
         fi
     else c_warn "claude CLI not found — install it, then re-run"; fi
 
+    install_caveman
     hdr "Next"
     echo "  cd <your-project> && agent-tools init"
     echo "  MANUAL: memory data does not migrate. See 'agent-tools help'."
@@ -1514,6 +1722,8 @@ stop_cmd() {
 case "${1:-help}" in
     doctor)            doctor ;;
     install-machine)   install_machine ;;
+    caveman)           shift; caveman_cmd "${1:-status}" ;;
+    update|upgrade)    shift; update_cmd "${1:-all}" ;;
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;
     status)            status_cmd ;;

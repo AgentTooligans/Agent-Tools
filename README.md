@@ -47,8 +47,13 @@ Full incident record with the evidence: [docs/WHY.md](docs/WHY.md).
 ## What it configures
 
 **Per computer** (`install-machine`): node, uv, graphify (with the right extras
-and pins), agentmemory, and a supervised memory server — launchd on macOS,
-systemd `--user` on Linux/WSL.
+and pins), your memory backend and its service (launchd on macOS, systemd
+`--user` on Linux/WSL), and **caveman** — a skill that cuts output tokens by
+telling the agent to drop filler. Skip it with `--no-caveman`.
+
+The three cover different halves of the same bill: graphify cuts what the agent
+must *read*, memory cuts what it must *re-derive*, caveman cuts what it *says
+back*. See [docs/CAVEMAN.md](docs/CAVEMAN.md) for what it costs you in nuance.
 
 `init` also offers to add a short section to your `AGENTS.md` / `CLAUDE.md`
 telling the agent to query the graph before grepping — MCP tools alone are
@@ -240,7 +245,8 @@ over 2,000 characters as a likely pasted log. **It never edits your file.**
 | [docs/MEMORY.md](docs/MEMORY.md) | choosing, switching and converting between memory backends |
 | [docs/USAGE.md](docs/USAGE.md) | when each tool earns its keep, what graphify is **bad** at, telling agents to use them, stale-graph behavior |
 | [docs/SERVICES.md](docs/SERVICES.md) | startup, restarts, reboots — including the WSL-after-Windows-restart gap |
-| [docs/UPDATING.md](docs/UPDATING.md) | updating each component, and why upgrading graphify can cost hours |
+| [docs/UPDATING.md](docs/UPDATING.md) | `agent-tools update`, per-component upgrade steps, and why upgrading graphify can cost hours |
+| [docs/CAVEMAN.md](docs/CAVEMAN.md) | the output-compression skill: why it is default, its levels, and the nuance it costs |
 | [docs/AGENTS.md](docs/AGENTS.md) | Codex, Cursor, Gemini CLI, Copilot and friends |
 | [docs/PLATFORMS.md](docs/PLATFORMS.md) | support matrix, verification status, WSL traps |
 | [docs/WHY.md](docs/WHY.md) | the incident record behind every default |
