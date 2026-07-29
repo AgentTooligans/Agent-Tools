@@ -158,8 +158,8 @@ That is the failure mode to watch for.
 Check and refresh:
 
 ```bash
-agent-tools refresh --check   # is anything pending?
-agent-tools refresh           # structure -> labels -> viz -> verify
+agent-tools doctor    # what state is this project in?
+agent-tools refresh   # structure -> labels -> viz -> verify
 ```
 
 Rule of thumb: refresh **before you lean on the graph**, not on a schedule.
