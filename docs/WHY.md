@@ -310,3 +310,23 @@ agentmemory status
 
 Expected: graph present with node/edge counts, server healthy on :3111 with your
 real session and observation counts.
+
+
+---
+
+## 2026-07-29 — the graph has no sense of time
+
+A real graph was found holding a 190-line snapshot of a ledger that had grown to
+3,061 lines and was seven days behind, sitting beside the live one at equal
+standing. Nodes carry no date and no ordering (`version` was null on 14,644 of
+14,647), so nothing distinguished them.
+
+Hence two defaults: `init` and `doctor` care about instruction-file hygiene and
+duplicate sections, and the documented practice is **scope** (`.graphifyignore`)
+plus **`STATUS:` banners in prose**, because prose is the only staleness signal
+extraction can read. Full failure catalog: [GRAPH-HYGIENE.md](GRAPH-HYGIENE.md).
+
+Also from that day: `GRAPHIFY_API_TIMEOUT` defaults to 1800s for deep runs. A
+chunk that exceeds the 600s default is lost, which makes the run partial, which
+trips the node-count guard, which wastes the entire run — and a retry loop
+without the raised ceiling just hits the same wall on the same chunk.

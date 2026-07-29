@@ -141,10 +141,22 @@ backfill_project() {
     name="$(basename "$name")"
     [ -n "$name" ] && [ "$name" != "/" ] || return 0
     "${PYBIN:-python3}" - "$CM_DB" "$sid" "$name" <<'PYEOF'
-import sqlite3, sys
+import sqlite3, sys, time
 db, sid, name = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     c = sqlite3.connect(db)
+    # The worker writes session_summaries ASYNCHRONOUSLY -- the hook returns
+    # before the row exists. Backfilling immediately updated sdk_sessions but
+    # silently missed the summary, leaving project='' on exactly the row that
+    # project-scoped recall reads. Wait for it. Verified 2026-07-29.
+    for _ in range(30):
+        row = c.execute("SELECT memory_session_id FROM sdk_sessions "
+                        "WHERE content_session_id=?", (sid,)).fetchone()
+        if row and row[0] and c.execute(
+                "SELECT 1 FROM session_summaries WHERE memory_session_id=?",
+                (row[0],)).fetchone():
+            break
+        time.sleep(1)
     c.execute("UPDATE sdk_sessions SET project=? "
               "WHERE content_session_id=? AND (project='' OR project IS NULL)",
               (name, sid))
