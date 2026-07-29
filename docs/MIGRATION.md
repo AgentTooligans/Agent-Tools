@@ -70,10 +70,63 @@ These are large, machine-specific, and rebuilt correctly by `install-machine`:
 so post-commit/post-checkout must be reinstalled per machine by
 `agent-tools init`.
 
+### Inside `~/.claude` specifically
+
+That one directory holds ~20 different things with very different value. Two of
+the smallest matter most and are the easiest to forget.
+
+**🔴 Your own content — copy these:**
+
+| entry | size | what it is |
+|---|---|---|
+| `CLAUDE.md` | 4 K | **your global instructions for every project.** Small, hand-written, irreplaceable. It also `@`-imports other files — mine pulls in `RTK.md`, so copying one without the other silently breaks it. |
+| `RTK.md` (and any other `@`-imported file) | 4 K | imported by `CLAUDE.md`. Check the `@` lines at the top of your `CLAUDE.md` and carry every file they name. |
+| `settings.json` | 4 K | global hooks and settings |
+| `projects/` | 192 M | every session transcript |
+| `plans/` | 108 K | **saved plan-mode plans** — real work product, not regenerable |
+| `.caveman-active` | tiny | caveman level, else a fresh install starts at `full` |
+
+**🟡 Optional — convenience, not content:**
+
+| entry | size | notes |
+|---|---|---|
+| `history.jsonl` | 52 K | your prompt history (↑ recall in the CLI) |
+| `file-history/` | 36 M | edit history backing file restore. Useful for recent work, rarely worth 36 M on a move. |
+
+**🟢 Do NOT copy — machine-local, transient, or refetched:**
+
+| entry | why not |
+|---|---|
+| `plugins/` (580 M) | reinstalled by `install-machine` / the plugins' own installers |
+| `shell-snapshots/` | **captured PATH, functions and aliases from *this* machine** — copying them injects the old machine's environment |
+| `sessions/` | named by process id (`10906.json`); live/recent session state |
+| `session-env/` | per-session environment, 140 stale entries here |
+| `cache/`, `paste-cache/`, `tmp/`, `downloads/`, `backups/` | scratch |
+| `remote-settings.json`, `policy-limits.json` | **managed/organization policy, fetched by the client** — let them re-fetch rather than pinning a stale copy |
+| `skills/` | symlinks into `~/.agents/skills`; recreated on install |
+| `.last-cleanup`, `.caveman-mode-log.jsonl`, `.DS_Store` | housekeeping and logs |
+
+> **The `@`-import trap is the one to watch.** `~/.claude/CLAUDE.md` is 4 KB and
+> reads like nothing, but it is your standing instructions for every project, and
+> an `@RTK.md` line means a second file is load-bearing. Copy the directory's
+> small files together, or read the `@` lines and carry each one.
+
 ### The one-line version
 
-Copy `~/.claude-mem/`, `~/.claude/projects/`, and `~/.claude.json`. Reinstall
-everything else. Rotate the keys rather than copying them.
+Copy `~/.claude-mem/`, `~/.claude/projects/`, `~/.claude.json`, and the small
+hand-written files in `~/.claude/` (`CLAUDE.md` + whatever it `@`-imports,
+`settings.json`, `plans/`). Reinstall everything else. Rotate the keys rather
+than copying them.
+
+A tar of just the irreplaceable parts, skipping the ~800 M of reinstallable
+caches:
+
+```bash
+tar czf agent-move.tgz \
+  -C "$HOME" .claude-mem .claude.json .config/graphify .config/agent-tools \
+  -C "$HOME/.claude" CLAUDE.md RTK.md settings.json plans projects
+# (add RTK.md's siblings if your CLAUDE.md @-imports more than one file)
+```
 
 ### The same paths on every platform
 
