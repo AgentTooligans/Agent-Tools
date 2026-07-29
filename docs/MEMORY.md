@@ -104,12 +104,23 @@ Ingests the current repo (~5 min). Best for *codebase* knowledge.
 past sessions from `~/.claude/projects` through the Stop hook. Best for
 *session* history.
 
-> ⚠️ The replay script is **unverified**. It was derived by reading claude-mem's
-> minified bundle, and the hook mechanism it uses is the same one the (verified)
-> converter uses — but the script itself has not been run end to end. It is
-> dry-run by default, caps at 5 transcripts, and tells you to try one and check
-> `claude-mem status` before committing. Each replayed session costs an LLM
-> summarisation pass.
+**Verified 2026-07-29** against claude-mem 13.12.4: transcripts replay, summaries
+land, and sessions carry the right project. It stays dry-run by default and caps
+at 5 transcripts, because **each replayed session costs an LLM summarization
+pass** — 173 transcripts is 173 of them. Start with `--limit 1 --go`.
+
+Two quirks the script works around, both found by running it:
+
+- **`cwd` comes from the transcript records**, not the hook payload. Transcripts
+  copied from another machine carry that machine's paths, so the script rewrites
+  them into a temp copy before feeding it. Claude Code's project directory names
+  are lossy (`/` becomes `-`, so `a home-automation project` is ambiguous), so it
+  resolves the real path by merging segments back until one exists on disk.
+- **`project` is only stamped in claude-mem's user-prompt path.** A Stop-only
+  replay leaves it empty, which makes project-scoped recall miss the session, so
+  the script backfills it using claude-mem's own rule —
+  `basename(git rev-parse --show-toplevel)`. That column carries no embedding,
+  so writing it directly is safe; content never is.
 
 ---
 
