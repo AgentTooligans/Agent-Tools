@@ -88,10 +88,12 @@ AT_CONFIG="$AT_CONFIG_DIR/config"
 MEMORY_DEFAULT="claude-mem"
 MEMORY_BACKEND=""
 SKIP_CAVEMAN=0
+FORCE_IMPORT=0
 for _a in "$@"; do
     case "$_a" in
         --memory=*) MEMORY_BACKEND="${_a#--memory=}" ;;
         --no-caveman) SKIP_CAVEMAN=1 ;;
+        --force) FORCE_IMPORT=1 ;;
     esac
 done
 if [ -z "$MEMORY_BACKEND" ] && [ -f "$AT_CONFIG" ]; then
@@ -288,6 +290,8 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools obsidian DIR      export graph + memories into an Obsidian vault
   agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
   agent-tools update [WHAT]     update all|graphify|memory|caveman|self
+  agent-tools migrate export    archive what git cannot carry (memory, keys, ~/.claude)
+  agent-tools migrate import F  restore that archive on a new computer
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -959,6 +963,140 @@ update_cmd() {
 
     echo
     c_ok "done — run 'agent-tools doctor' to confirm nothing came loose"
+}
+
+# ---------------------------------------------------------------------------
+# migrate — move everything git cannot carry to another computer.
+#
+# WHY A COMMAND AND NOT A DOCUMENTED tar LINE
+#   The path list is not stable across machines or backends, and two details are
+#   easy to get wrong by hand:
+#     * the memory worker must be STOPPED at both ends, or you copy a
+#       half-written SQLite store;
+#     * ~/.claude/CLAUDE.md can `@`-import other files (RTK.md, etc.). Copying
+#       CLAUDE.md without them silently breaks the import, and nothing warns you.
+#   This resolves both, skips ~800 MB of reinstallable caches, and refuses to
+#   clobber an existing store unless told to.
+#
+# PLATFORMS
+#   Paths are identical relative to $HOME on macOS, Linux and WSL2. On native
+#   Windows run it from Git Bash (tar ships with Windows 10+). WSL2 is its OWN
+#   machine: archive inside the distro, not from the Windows profile.
+# ---------------------------------------------------------------------------
+migrate_paths() {                      # prints HOME-relative paths that exist
+    local p
+    for p in .claude-mem .agentmemory .claude.json \
+             .config/graphify .config/agent-tools \
+             .claude/CLAUDE.md .claude/settings.json .claude/plans \
+             .claude/projects .claude/.caveman-active; do
+        [ -e "$HOME/$p" ] && printf '%s\n' "$p"
+    done
+    # Files pulled in by `@import` lines at the top of the global CLAUDE.md.
+    # Missing these is the quiet failure this command exists to prevent.
+    if [ -f "$HOME/.claude/CLAUDE.md" ]; then
+        sed -n 's/^@\([A-Za-z0-9_./-]*\).*/\1/p' "$HOME/.claude/CLAUDE.md" 2>/dev/null \
+        | while read -r imp; do
+            [ -n "$imp" ] || continue
+            [ -e "$HOME/.claude/$imp" ] && printf '.claude/%s\n' "$imp"
+          done
+    fi
+}
+
+migrate_stop_memory() {
+    case "$MEMORY_BACKEND" in
+      claude-mem)  have npx && npx claude-mem stop >/dev/null 2>&1 ;;
+      agentmemory) svc_stop >/dev/null 2>&1 ;;
+    esac
+}
+
+migrate_start_memory() {
+    case "$MEMORY_BACKEND" in
+      claude-mem)  have npx && npx claude-mem start >/dev/null 2>&1 ;;
+      agentmemory) svc_start >/dev/null 2>&1 ;;
+    esac
+}
+
+migrate_cmd() {
+    local action="${1:-}" file="${2:-}"
+    case "$action" in
+      export)
+        file="${file:-$HOME/agent-move.tgz}"
+        hdr "Exporting what git cannot carry"
+        have tar || { c_bad "tar not found (on Windows use Git Bash)"; return 1; }
+
+        local list; list="$(migrate_paths)"
+        [ -n "$list" ] || { c_bad "nothing found to export"; return 1; }
+
+        c_warn "stopping the memory worker so its store is not mid-write"
+        migrate_stop_memory
+
+        # A manifest makes a restore self-describing months later. Stage it
+        # INSIDE $HOME and archive everything from one directory: mixing -C with
+        # a path list is not portable -- bsdtar resolved a -T list against the
+        # new cwd and archived /var instead. One cwd, no -C, no surprises.
+        local man=".agent-tools-manifest.txt"
+        {
+            printf 'created: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            printf 'platform: %s\n' "$PLATFORM"
+            printf 'memory_backend: %s\n' "$MEMORY_BACKEND"
+            printf 'paths:\n'
+            printf '%s\n' "$list" | sed 's/^/  - /'
+        } > "$HOME/$man"
+
+        printf '%s\n' "$list" | sed 's/^/  + /'
+        # Excludes: machine- and architecture-specific things that must NOT
+        # travel. ~/.agentmemory/bin/iii is a 27 MB native binary (arm64 Mach-O
+        # here) that is the WRONG ARCHITECTURE anywhere else -- it re-downloads.
+        # PIDs and engine state can make a later `stop --force` signal an
+        # unrelated process. Logs and .DS_Store are noise.
+        ( cd "$HOME" && tar czf "$file" \
+            --exclude '.agentmemory/bin' \
+            --exclude '.agentmemory/logs' \
+            --exclude '*.pid' \
+            --exclude 'engine-state.json' \
+            --exclude '.DS_Store' \
+            "$man" $list ) 2>/dev/null \
+            || { c_bad "tar failed"; rm -f "$HOME/$man"; migrate_start_memory; return 1; }
+        rm -f "$HOME/$man"
+
+        migrate_start_memory
+        c_ok "wrote $file ($(du -h "$file" 2>/dev/null | cut -f1))"
+        echo
+        c_warn "NOT included (reinstall instead): plugins, uv tools, ~/.local/bin,"
+        c_warn "~/.agents/skills, shell-snapshots, session-env, caches."
+        c_warn "On the new machine:  agent-tools migrate import $(basename "$file")"
+        ;;
+
+      import)
+        [ -n "$file" ] || { c_bad "usage: agent-tools migrate import <archive.tgz>"; return 2; }
+        [ -f "$file" ] || { c_bad "no such file: $file"; return 1; }
+        hdr "Restoring from $file"
+        have tar || { c_bad "tar not found (on Windows use Git Bash)"; return 1; }
+
+        tar tzf "$file" >/dev/null 2>&1 || { c_bad "not a readable tar.gz"; return 1; }
+        tar xzOf "$file" .agent-tools-manifest.txt 2>/dev/null | sed 's/^/  /' || true
+
+        c_warn "stopping the memory worker before overwriting its store"
+        migrate_stop_memory
+
+        # -k keeps existing files: a fresh install may already have created a
+        # store, and silently replacing it is not a decision to make for someone.
+        local flags="xzkf"
+        [ "$FORCE_IMPORT" = 1 ] && flags="xzf"
+        tar "$flags" "$file" -C "$HOME" 2>/dev/null
+        rm -f "$HOME/.agent-tools-manifest.txt"
+        local rc=$?
+        [ "$FORCE_IMPORT" = 1 ] || c_warn "existing files were KEPT (--force to overwrite)"
+
+        migrate_start_memory
+        [ "$rc" = 0 ] && c_ok "restore complete" || c_warn "tar reported conflicts; see the note above"
+        echo
+        c_ok "next:  cd <project> && agent-tools init && agent-tools refresh --code-only"
+        c_ok "then:  agent-tools doctor"
+        ;;
+
+      *) c_bad "usage: agent-tools migrate export [FILE] | import <FILE> [--force]"; return 2 ;;
+    esac
 }
 
 install_machine() {
@@ -1766,6 +1904,7 @@ case "${1:-help}" in
     install-machine)   install_machine ;;
     caveman)           shift; caveman_cmd "${1:-status}" ;;
     update|upgrade)    shift; update_cmd "${1:-all}" ;;
+    migrate)           shift; migrate_cmd "${1:-}" "${2:-}" ;;
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;
     status)            status_cmd ;;

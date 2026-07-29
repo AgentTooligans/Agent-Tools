@@ -188,41 +188,135 @@ Get-ChildItem "$env:USERPROFILE\.claude-mem","$env:USERPROFILE\.claude" -Recurse
 
 ---
 
-## Part 2 — New machine, in order
+## Part 2 — The move, in order
+
+Order matters in two places: **stop the memory worker before copying its store**
+(both ends), and **restore before you start working**, or a freshly-started
+worker writes into a store you are about to overwrite.
+
+### The short way — one command each end
+
+```bash
+# OLD machine
+agent-tools migrate export              # writes ~/agent-move.tgz
+
+# NEW machine, after installing (see below)
+agent-tools migrate import ~/agent-move.tgz
+```
+
+`export` stops the memory worker so the store is not copied mid-write, collects
+only what git cannot carry, and **follows the `@`-imports in your global
+`CLAUDE.md`** so a load-bearing file like `RTK.md` cannot be left behind. It
+writes a manifest into the archive, so a restore months later explains itself.
+
+It deliberately excludes what must not travel: `~/.agentmemory/bin/` (a 27 MB
+native binary that is the wrong architecture anywhere else — it re-downloads),
+PID and engine-state files, logs, and `.DS_Store`. It never includes the ~800 MB
+of reinstallable caches.
+
+`import` prints the manifest, stops the worker before touching the store, and
+**keeps any existing file rather than clobbering it** — pass `--force` to
+overwrite. Both work identically on macOS, Linux and WSL2, and on native Windows
+from Git Bash (`tar` ships with Windows 10+).
+
+The rest of this section is the same thing by hand, if you would rather see every
+step or need to vary it.
+
+### On the OLD machine
+
+```bash
+# 1. stop the worker so the store is not mid-write
+npx claude-mem stop
+
+# 2. make sure the expensive LLM cache is actually committed, in EVERY repo
+#    (negation rules make files addable; they do not add them)
+for r in ~/Projects/*/; do
+  [ -d "$r/.git" ] || continue
+  printf '%s: %s cache files tracked\n' "$(basename "$r")" \
+    "$(git -C "$r" ls-files graphify-out/cache | wc -l)"
+done
+# then commit + push each repo as usual
+
+# 3. a human-readable backup of memory, independent of any SQLite format
+agent-tools memory export ~/memory-notes
+
+# 4. the archive of everything git cannot carry
+tar czf ~/agent-move.tgz \
+  -C "$HOME" .claude-mem .claude.json .config/graphify .config/agent-tools \
+  -C "$HOME/.claude" CLAUDE.md RTK.md settings.json plans projects
+#    add ~/memory-notes, and any other file your CLAUDE.md @-imports
+```
+
+Skip `.claude-mem` from the tar if you would rather start memory fresh; the
+Markdown export from step 3 is still a readable record either way.
+
+### On the NEW machine
 
 ```bash
 # 1. the tool itself
 git clone <your-agent-tools-remote> ~/Projects/Agent-Tools
 cd ~/Projects/Agent-Tools && ./install.sh
 
-# 2. everything it manages: node, uv, graphify (with extras + the mcp<2 pin),
+# 2. everything it manages: node, uv, graphify (extras + the mcp<2 pin),
 #    the memory backend and its service, caveman
 agent-tools install-machine
 
-# 3. per project — this is what recreates the git hooks and MCP wiring
+# 3. STOP the worker install-machine just started, before overwriting its store
+npx claude-mem stop
+
+# 4. restore. -k refuses to clobber anything already there; drop it to overwrite
+tar xzkf ~/agent-move.tgz -C "$HOME"          # .claude-mem, .claude.json, .config/*
+mkdir -p ~/.claude && tar xzkf ~/agent-move.tgz -C ~/.claude \
+  CLAUDE.md RTK.md settings.json plans projects 2>/dev/null
+
+# 5. bring memory back up
+npx claude-mem start
+
+# 6. per project: clone, then re-create git hooks + MCP wiring
 cd ~/Projects/<project> && agent-tools init
 
-# 4. rebuild the graph from the committed cache (no LLM, no cost)
+# 7. rebuild the graph from the committed cache — no LLM, no cost
 agent-tools refresh --code-only
 
-# 5. confirm
+# 8. confirm
 agent-tools doctor
 ```
 
 `init` is idempotent — it reports "already configured" for anything already in
 place, so re-running it is always safe.
 
-**Then carry over what git could not.** Memory is the one that surprises people:
+### Verify the move actually landed
 
 ```bash
-# on the OLD machine
-agent-tools memory export ~/memory-notes    # verbatim Markdown, exact
-# copy ~/memory-notes across (or commit it somewhere private)
+agent-tools doctor                  # worker answering, MCP wired, hooks present
+agent-tools memory status           # backend, and that it is not empty
+claude --resume                     # your transcripts should be listed
 ```
 
-Copying `~/.claude-mem/` wholesale also works and preserves vector search, but it
-is a moving SQLite + Chroma store — **stop the worker first** (`npx claude-mem
-stop`) or you may copy a torn database.
+And check memory survived rather than assuming it did:
+
+```bash
+sqlite3 ~/.claude-mem/claude-mem.db \
+  'select count(*) from session_summaries;'    # compare with the old machine
+```
+
+If that returns 0 on a restore you expected to be populated, the archive did not
+include `.claude-mem` or `-k` refused to overwrite a store the fresh install had
+already created.
+
+### Windows / PowerShell
+
+`tar` ships with Windows 10+ and the same commands work in PowerShell; only the
+home variable changes:
+
+```powershell
+tar czf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE `
+  .claude-mem .claude.json .config\graphify .config\agent-tools
+tar xzkf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE
+```
+
+Remember that **WSL2 is a separate machine** with its own home — archive and
+restore inside the distro, not from the Windows profile.
 
 ---
 

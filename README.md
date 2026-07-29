@@ -78,6 +78,7 @@ second step.
 | command | scans | LLM? | time |
 |---|---|---|---|
 | `agent-tools init` | code only (AST) | no | ~1 min |
+| `agent-tools migrate export` / `import` | move memory, keys and `~/.claude` to another computer | no | seconds |
 | `agent-tools refresh` | code + **docs + images**, then names the communities | yes | minutes → hours |
 | `agent-tools refresh --deep` | same, plus aggressive inferred edges | yes | hours on a big corpus |
 
