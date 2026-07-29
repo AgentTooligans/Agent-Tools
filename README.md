@@ -49,6 +49,10 @@ Full incident record with the evidence: [docs/WHY.md](docs/WHY.md).
 and pins), agentmemory, and a supervised memory server — launchd on macOS,
 systemd `--user` on Linux/WSL.
 
+`init` also offers to add a short section to your `AGENTS.md` / `CLAUDE.md`
+telling the agent to query the graph before grepping — MCP tools alone are
+passive, and the instruction file is what an agent actually reads every session.
+
 **Per project** (`init`):
 
 | | |
@@ -117,6 +121,17 @@ rm    .git/graphify-auto-update-ENABLED    # disable (the default)
 ```
 
 ---
+
+## Documentation
+
+| doc | what's in it |
+|---|---|
+| [docs/USAGE.md](docs/USAGE.md) | when each tool earns its keep, what graphify is **bad** at, telling agents to use them, stale-graph behavior |
+| [docs/SERVICES.md](docs/SERVICES.md) | startup, restarts, reboots — including the WSL-after-Windows-restart gap |
+| [docs/UPDATING.md](docs/UPDATING.md) | updating each component, and why upgrading graphify can cost hours |
+| [docs/AGENTS.md](docs/AGENTS.md) | Codex, Cursor, Gemini CLI, Copilot and friends |
+| [docs/PLATFORMS.md](docs/PLATFORMS.md) | support matrix, verification status, WSL traps |
+| [docs/WHY.md](docs/WHY.md) | the incident record behind every default |
 
 ## Extras
 

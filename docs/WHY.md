@@ -68,8 +68,8 @@ only. Extraction runs with Opus, Sonnet, Haiku, and `--mode deep` all produced
 re-clusters and, when the community set has shifted, renames every community
 after its **hub node** rather than calling the LLM — it prints *"Run `graphify
 label` to refresh names with the LLM"* and exits 0, so it looks successful. On
-2026-07-28 this silently replaced 534 thematic names (*Event Rule Engine*,
-*InfluxDB Dialect Parsing Tests*) with hub names (*api_live.py*, *EnergyCache*)
+2026-07-28 this silently replaced 534 thematic names (*Billing Rules Engine*,
+*Payment Retry Tests*) with hub names (*api_client.py*, *SessionCache*)
 because semantic extraction had shifted the clustering 534 -> 280.
 
 Corollary: **any run that changes the graph invalidates the labels.** Labels are
@@ -301,7 +301,7 @@ with `limit: 0` for both request and token quotas.
 
 ```bash
 ./scripts/setup-dev-machine.sh --check
-graphify query "how does heatmap outlier attribution work"
+graphify query "how does session expiry work"
 agentmemory status
 ```
 

@@ -684,6 +684,40 @@ HK
         fi
     fi
 
+    # --- agent instructions -------------------------------------------------
+    # MCP tools alone are passive: an agent CAN call them but often won't. The
+    # durable fix is the instruction file the agent already reads every session.
+    local instr=""
+    for f in AGENTS.md CLAUDE.md .cursorrules; do [ -f "$f" ] && { instr="$f"; break; }; done
+    [ -z "$instr" ] && instr="AGENTS.md"
+    if grep -q "agent-tools:managed" "$instr" 2>/dev/null; then
+        c_ok "agent instructions already in $instr"
+    elif confirm "a short 'use the graph and memory' section in $instr"; then
+        cat >> "$instr" <<'INSTR'
+
+<!-- agent-tools:managed -->
+## Codebase knowledge (graphify)
+
+Before grepping or reading files broadly, ask the graph:
+
+    graphify query "<question>"        # scoped subgraph, cheap
+    graphify affected "<symbol>"       # blast radius before refactoring
+    graphify god-nodes                 # what is risky to touch at all
+
+The graph covers code structure, docs and concepts. It does NOT index
+string-level details (CSS variables, literals) — use grep for those.
+If the graph looks stale, run `agent-tools refresh`.
+
+## Memory (agentmemory)
+
+Past sessions are searchable. Use recall before re-deriving an earlier
+decision, and save durable decisions explicitly. Memory is for decisions and
+rationale; the graph is for what the code *is*.
+<!-- /agent-tools:managed -->
+INSTR
+        c_ok "agent instructions added to $instr"
+    fi
+
     if [ -f graphify-out/graph.json ]; then
         c_ok "graph exists: $(graph_stats)"
     else
