@@ -1,0 +1,706 @@
+#!/usr/bin/env bash
+# ===========================================================================
+# agent-tools — set up graphify + agentmemory for ANY project, on any platform.
+#
+# One self-contained file. No dependencies beyond bash, python3, and the tools
+# it installs.
+#
+#   agent-tools doctor            what's installed / what's wrong  (safe)
+#   agent-tools install-machine   one-time per COMPUTER
+#   agent-tools init              one-time per PROJECT (run inside the repo)
+#   agent-tools refresh           update this project's graph, in order
+#   agent-tools help              long help, with the reasoning
+#
+# PLATFORM SUPPORT
+#   macOS          full         launchd service
+#   Linux          full         systemd --user service
+#   WSL2           full         systemd --user if enabled, else manual start
+#   Windows native PARTIAL      graphify only — see `agent-tools help`
+#
+#   Native Windows is limited by agentmemory upstream, not by this script: its
+#   engine has no PowerShell/scoop/winget installer and `agentmemory connect` is
+#   unsupported there. Upstream's own advice is WSL2, and so is ours.
+#
+# Every default here comes from an observed failure. The ones that will bite you
+# if changed are marked LAW.
+# ===========================================================================
+set -uo pipefail
+VERSION=2.0.0
+
+BIN="$HOME/.local/bin"
+AM="$HOME/.agentmemory"
+
+c_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+c_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
+c_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+hdr()    { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+have()   { command -v "$1" >/dev/null 2>&1; }
+
+# WSL inherits the WINDOWS PATH, so `node`/`npm` frequently resolve to
+# /mnt/c/Program Files/nodejs/... — Windows binaries running under Linux paths.
+# Installing through them puts packages in the WINDOWS npm prefix
+# (/mnt/c/Users/<you>/AppData/Roaming/npm) and any Linux service pointed at the
+# result FAILS while every check still looks green. Observed on real WSL2
+# 2026-07-29: agentmemory "installed" to /mnt/c/... and its systemd unit died.
+# So inside WSL a Windows-hosted binary counts as NOT INSTALLED.
+have_native() {
+    local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+    [ -n "$p" ] || return 1
+    if [ "$PLATFORM" = wsl ]; then
+        case "$p" in /mnt/*) return 1 ;; esac
+    fi
+    return 0
+}
+# Where a command actually lives, for honest reporting.
+where_is() { command -v "$1" 2>/dev/null || echo "not found"; }
+
+export PATH="$BIN:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# ---------------------------------------------------------------------------
+# Consent for installs.
+#   default    ask before installing anything
+#   --yes/-y   install everything without asking (CI, unattended)
+#   --no-install  never install; just report what is missing
+# Non-interactive with no --yes SKIPS rather than blocks: a script that hangs
+# forever waiting on a prompt nobody can answer is worse than one that stops.
+# ---------------------------------------------------------------------------
+ASSUME_YES=0
+NO_INSTALL=0
+for _a in "$@"; do
+    case "$_a" in
+        -y|--yes)     ASSUME_YES=1 ;;
+        --no-install) NO_INSTALL=1 ;;
+    esac
+done
+
+confirm() {   # confirm "<what>" -> 0 = go ahead
+    if [ "$NO_INSTALL" = 1 ]; then c_warn "missing: $1  (--no-install set; skipping)"; return 1; fi
+    if [ "$ASSUME_YES" = 1 ]; then c_warn "installing: $1"; return 0; fi
+
+    # Is there REALLY a terminal? `[ -r /dev/tty ]` is not enough: in a container
+    # the device node exists and looks readable, but opening it fails with ENXIO
+    # when there is no controlling terminal. That false positive made a
+    # non-interactive run take the prompt path and install without consent.
+    local src=""
+    if [ -t 0 ]; then src="stdin"
+    elif { : < /dev/tty; } 2>/dev/null; then src="tty"; fi
+
+    if [ -z "$src" ]; then
+        c_warn "missing: $1  (non-interactive — re-run with --yes to install)"
+        return 1
+    fi
+
+    printf '  \033[33m?\033[0m Install %s? [Y/n] ' "$1"
+    local reply=""
+    # FAIL CLOSED: if the read fails (EOF, closed pipe, unusable tty) that is a
+    # non-answer and must mean "no". Only a successful read counts as consent —
+    # an empty reply then is the user pressing Enter, which is the [Y/n] default.
+    if [ "$src" = tty ]; then
+        read -r reply < /dev/tty || { echo; c_warn "no answer — skipping $1"; return 1; }
+    else
+        read -r reply || { echo; c_warn "no answer — skipping $1"; return 1; }
+    fi
+    case "$reply" in [nN]*) c_warn "skipped: $1"; return 1 ;; *) return 0 ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# Platform detection. Everything platform-specific dispatches on PLATFORM.
+# ---------------------------------------------------------------------------
+detect_platform() {
+    local s; s="$(uname -s 2>/dev/null || echo unknown)"
+    case "$s" in
+        Darwin) echo macos ;;
+        Linux)
+            # WSL reports Linux; the giveaway is "microsoft" in the kernel
+            # string (WSL1 and WSL2 both) or the distro env var.
+            if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+                echo wsl
+            else
+                echo linux
+            fi ;;
+        MINGW*|MSYS*|CYGWIN*) echo windows ;;
+        *) echo unknown ;;
+    esac
+}
+PLATFORM="$(detect_platform)"
+
+# systemd --user is not a given: WSL needs systemd=true in /etc/wsl.conf, and
+# some containers/distros run without it. Check before relying on it.
+has_systemd() {
+    have systemctl || return 1
+    [ -d /run/systemd/system ] || return 1
+    systemctl --user show-environment >/dev/null 2>&1
+}
+
+# pgrep is absent on Git Bash; fall back to ps.
+proc_running() {
+    if have pgrep; then pgrep -f "$1" >/dev/null 2>&1
+    else ps -ef 2>/dev/null | grep -E "$1" | grep -qv grep; fi
+}
+
+# Windows/Git Bash usually ships `python`, not `python3`; some minimal Linux
+# images are the reverse. Resolve once and use $PY everywhere.
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else PY=""; fi
+
+SERVICE_LABEL="com.agentmemory.server"
+PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+UNIT_DIR="$HOME/.config/systemd/user"
+UNIT="$UNIT_DIR/agentmemory.service"
+
+# ---------------------------------------------------------------------------
+usage() {
+cat <<'USAGE'
+agent-tools — graphify + agentmemory, set up correctly, on any project.
+
+  agent-tools doctor            report only; changes nothing
+  agent-tools install-machine   once per computer
+  agent-tools init              once per project (run from inside the repo)
+  agent-tools refresh           refresh this project's graph, in the right order
+  agent-tools help              the reasoning behind every default
+
+Flags (install-machine):
+  -y, --yes       install everything missing without asking (CI / unattended)
+      --no-install  never install; just report what is missing
+  default         ask before each install; skips (never hangs) when
+                  non-interactive
+
+Platforms: macOS · Linux · WSL2 = full.  Native Windows = graphify only.
+
+New machine:   agent-tools install-machine
+New project:   cd ~/code/myrepo && agent-tools init
+Day to day:    agent-tools refresh
+USAGE
+}
+
+long_help() {
+cat <<'HELP'
+PLATFORMS
+
+  macOS    launchd user agent (~/Library/LaunchAgents)
+  Linux    systemd --user unit (~/.config/systemd/user), `loginctl enable-linger`
+           recommended so the memory server survives logout
+  WSL2     same as Linux when systemd is enabled (systemd=true in /etc/wsl.conf,
+           then `wsl --shutdown`). Without systemd there is no supervisor, so
+           the server must be started manually — `agent-tools doctor` says so.
+  Windows  graphify works (pure Python). agentmemory does NOT install cleanly:
+           upstream ships no PowerShell/scoop/winget installer for its engine,
+           and `agentmemory connect` is unsupported on native Windows. Use WSL2.
+           Exception: `agentmemory connect copilot-cli` is Windows-safe.
+
+WHY EACH DEFAULT EXISTS  (all observed 2026-07-28)
+
+graphify
+  * Code NEVER goes through an LLM. Extraction with Opus, Sonnet, Haiku and
+    --mode deep produced byte-identical code graphs. Only docs/images cost
+    tokens. So `graphify update .` is free; doc extraction is the paid part.
+  * LAW: labels run LAST, and only via `graphify label`. Labels are keyed to a
+    clustering, so anything that changes the graph invalidates them.
+    `cluster-only` does NOT call the LLM — it renames every community after its
+    hub node and exits 0, which looks like success. Measured erosion from single
+    out-of-order runs: 501/535, 280/280 and 137/271 communities hub-renamed.
+  * Install needs extras. [gemini] is a MISNOMER — it installs the `openai` HTTP
+    client + tiktoken, which is exactly what the gemini, openai, kimi AND ollama
+    backends all use (they all speak the OpenAI-compatible protocol). Without it
+    any of them dies with "the 'openai' package is required". [mcp] is for the
+    MCP server. The only backend not covered is `anthropic` (the API-key Claude
+    backend) — add it if you ever want that; `claude-cli` needs no package since
+    it shells out to the CLI.
+  * There is NO codex backend. graphify's list is: claude, claude-cli, gemini,
+    openai, kimi, deepseek, ollama, azure, bedrock. A ChatGPT subscription
+    cannot drive it, and neither can Antigravity/`agy`.
+  * Antigravity replaces the Gemini *CLI* (sunset 2026-06-18), NOT the Gemini
+    API. graphify's gemini backend calls generativelanguage.googleapis.com, so
+    the CLI sunset does not affect it.
+  * LAW: pin mcp<2. graphify 0.9.29 does `from mcp.types import AnyUrl`, removed
+    in mcp 2.0.0, and reports the misleading "mcp not installed" when it IS.
+  * Hooks must call bare `graphify`, never an absolute path, or they break on
+    the next machine.
+
+agentmemory
+  * LAW: the store path is CWD-RELATIVE (v0.9.28: ./data/state_store.db).
+    AGENTMEMORY_DATA_DIR and --data-dir are documented but INERT (both tested).
+    The service's working directory is the only thing keeping one store. Start
+    it somewhere else and you silently get a new, empty one.
+  * LAW: `--tools core` must be a server ARGUMENT. Neither ~/.agentmemory/.env
+    nor the MCP shim's environment honored AGENTMEMORY_TOOLS. As an argument it
+    cuts 53 tools (~5,918 tokens of schema per session) down to 8 (~995).
+  * Stop the server before copying store files, or the live engine overwrites
+    the session index mid-copy. Store files are JSON + an 8-byte hash/length
+    footer; hand-edit them and the engine rejects the file.
+  * Never run memory_heal on a freshly restored store — restored observations
+    look exactly like the "orphaned" data it deletes.
+
+MCP scope
+  * Project scope (-s local), not user scope. A user-scope entry makes every
+    `claude -p` subprocess boot the server (~300 ms each), pure waste for
+    scripted fan-out.
+
+Git
+  * graphify-out/ is generated. Commit ONLY cache/semantic-deep/ and the label
+    files: that is the expensive LLM work, and it makes a fresh clone rebuild
+    the graph for free. Everything else is derived output and pure churn.
+  * The post-commit hook is OPT-IN (fail closed). It began as opt-out, the
+    sentinel vanished, and the hook silently re-enabled itself.
+HELP
+}
+
+# ---------------------------------------------------------------------------
+# Package installation, per platform.
+# ---------------------------------------------------------------------------
+# Root has no sudo in containers/CI/minimal VMs; non-root without sudo cannot
+# install system packages at all. Found by running this on a bare Ubuntu image,
+# where `sudo apt-get` failed with "sudo: command not found".
+as_root() {
+    if [ "$(id -u)" = "0" ]; then "$@"; return; fi
+    have sudo || return 127                      # 127 = no sudo at all
+    # Passwordless sudo: just go.
+    if sudo -n true 2>/dev/null; then sudo "$@"; return; fi
+    # Needs a password — only attempt it when stdin is a REAL terminal.
+    # `{ : < /dev/tty; }` is not sufficient: over ssh+wsl that open succeeds
+    # even with nobody attached, so sudo sat there until "sudo: timed out"
+    # (observed on real WSL2 2026-07-29). `[ -t 0 ]` is the honest test.
+    if [ -t 0 ]; then sudo "$@"; return; fi
+    return 126                                   # 126 = needs password, no tty
+}
+
+install_node() {
+    have_native node && return 0
+    case "$PLATFORM" in
+        macos) have brew && brew install node ;;
+        linux|wsl)
+            if   have apt-get; then as_root apt-get update -qq && as_root apt-get install -y nodejs npm
+            elif have dnf;     then as_root dnf install -y nodejs npm
+            elif have pacman;  then as_root pacman -S --noconfirm nodejs npm
+            elif have zypper;  then as_root zypper install -y nodejs npm
+            else c_bad "no known package manager — install Node 18+ manually"; return 1; fi
+            local rc=$?
+            if ! have_native node; then
+                case $rc in
+                  126) c_warn "sudo needs a password and there is no terminal here."
+                       c_warn "Run this yourself, then re-run agent-tools:"
+                       c_warn "    sudo apt-get install -y nodejs npm" ;;
+                  127) c_warn "no sudo available and not root — install Node yourself." ;;
+                  *)   c_warn "node install did not succeed — install it yourself: https://nodejs.org" ;;
+                esac
+            fi ;;
+        windows) c_bad "install Node from https://nodejs.org (or: winget install OpenJS.NodeJS)"; return 1 ;;
+    esac
+    have_native node
+}
+
+install_uv() {
+    have uv && return 0
+    case "$PLATFORM" in
+        macos) have brew && brew install uv && return 0 ;;
+    esac
+    # Astral's installer is the portable route on Linux/WSL and works on macOS.
+    if have curl; then curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; fi
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    have uv || { c_bad "install uv manually: https://docs.astral.sh/uv/"; return 1; }
+}
+
+# ---------------------------------------------------------------------------
+# Service management, per platform. Each returns non-zero if unsupported.
+# ---------------------------------------------------------------------------
+svc_install() {
+    local ambin; ambin="$(command -v agentmemory || echo "$BIN/agentmemory")"
+    mkdir -p "$AM/logs"
+    case "$PLATFORM" in
+    macos)
+        mkdir -p "$HOME/Library/LaunchAgents"
+        cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$SERVICE_LABEL</string>
+  <!-- LAW: --tools core must be an ARGUMENT (env/.env are ignored). 53->8 tools. -->
+  <key>ProgramArguments</key>
+  <array><string>$ambin</string><string>--tools</string><string>core</string></array>
+  <!-- LAW: the store path is cwd-relative. Change this and you get an empty store. -->
+  <key>WorkingDirectory</key><string>$AM</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$AM/logs/server.out.log</string>
+  <key>StandardErrorPath</key><string>$AM/logs/server.err.log</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+PLISTEOF
+        launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null
+        launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null
+        return 0 ;;
+    linux|wsl)
+        if ! has_systemd; then return 2; fi   # 2 = no supervisor available
+        mkdir -p "$UNIT_DIR"
+        cat > "$UNIT" <<UNITEOF
+[Unit]
+Description=agentmemory server
+After=network.target
+
+[Service]
+Type=simple
+# LAW: --tools core must be an ARGUMENT (env and .env are ignored). 53->8 tools.
+ExecStart=$ambin --tools core
+# LAW: the store path is cwd-relative. Change this and you get an empty store.
+WorkingDirectory=$AM
+Environment=PATH=$BIN:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+Restart=on-failure
+StandardOutput=append:$AM/logs/server.out.log
+StandardError=append:$AM/logs/server.err.log
+
+[Install]
+WantedBy=default.target
+UNITEOF
+        systemctl --user daemon-reload 2>/dev/null
+        systemctl --user enable --now agentmemory.service 2>/dev/null
+        # Without lingering the service dies at logout on most distros.
+        have loginctl && loginctl enable-linger "$(id -un)" 2>/dev/null
+        return 0 ;;
+    windows) return 3 ;;                       # 3 = platform unsupported
+    *) return 3 ;;
+    esac
+}
+
+svc_stop() {
+    case "$PLATFORM" in
+        macos) launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null ;;
+        linux|wsl) has_systemd && systemctl --user stop agentmemory.service 2>/dev/null ;;
+    esac
+    ( cd "$AM" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
+}
+
+svc_start() {
+    case "$PLATFORM" in
+        macos) launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null ;;
+        linux|wsl) has_systemd && systemctl --user start agentmemory.service 2>/dev/null ;;
+    esac
+}
+
+svc_describe() {
+    case "$PLATFORM" in
+        macos) echo "launchd: $PLIST" ;;
+        linux|wsl) has_systemd && echo "systemd --user: $UNIT" || echo "no supervisor (start manually)" ;;
+        windows) echo "unsupported on native Windows — use WSL2" ;;
+    esac
+}
+
+# Verify the service definition still encodes both LAWs, whatever the platform.
+svc_check() {
+    local f=""
+    case "$PLATFORM" in
+        macos) f="$PLIST" ;;
+        linux|wsl) f="$UNIT" ;;
+        *) c_warn "no service on this platform ($PLATFORM)"; return ;;
+    esac
+    if [ ! -f "$f" ]; then c_warn "no service installed (server won't start at login)"; return; fi
+    grep -q "$AM" "$f" && c_ok "LAW: working directory pinned to $AM" \
+        || c_bad "LAW VIOLATED: working directory is not $AM — you will get an empty store"
+    grep -q "core" "$f" && c_ok "--tools core (8 tools, ~995 tokens)" \
+        || c_warn "--tools core not set: 53 tools ~= 5,918 tokens per session"
+}
+
+# ---------------------------------------------------------------------------
+graph_stats() {
+    [ -n "$PY" ] || { echo "python missing"; return; }
+    "$PY" -c "
+import json
+try:
+    d=json.load(open('graphify-out/graph.json'))
+    print(f\"{len(d['nodes'])} nodes, {len(d['links'])} edges\")
+except Exception: print('unreadable')" 2>/dev/null
+}
+
+doctor() {
+    hdr "Platform"
+    case "$PLATFORM" in
+        macos) c_ok "macOS — full support" ;;
+        linux) c_ok "Linux — full support" ;;
+        wsl)   has_systemd && c_ok "WSL2 with systemd — full support" \
+                || c_warn "WSL without systemd: no supervisor. Enable it (systemd=true in /etc/wsl.conf, then 'wsl --shutdown'), or start the server manually." ;;
+        windows) c_warn "native Windows — graphify only; agentmemory needs WSL2 (upstream limitation)" ;;
+        *) c_warn "unrecognized platform: $(uname -s)" ;;
+    esac
+    echo "  service: $(svc_describe)"
+
+    hdr "Machine"
+    if have_native node; then c_ok "node $(node -v)"
+    elif have node; then c_bad "node is the WINDOWS one ($(where_is node)) — install Node inside WSL"
+    else c_bad "node missing — run: agent-tools install-machine"; fi
+    have uv   && c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')" || c_bad "uv missing"
+    if have graphify; then
+        c_ok "graphify $(graphify --version 2>/dev/null | awk '{print $2}')"
+        local gpy="$HOME/.local/share/uv/tools/graphifyy/bin/python"
+        [ -x "$gpy" ] || gpy="$(command -v python3)"
+        if "$gpy" -c "import mcp.types as t; raise SystemExit(0 if hasattr(t,'AnyUrl') else 1)" 2>/dev/null; then
+            c_ok "graphify MCP deps OK (mcp<2 pinned)"
+        else
+            c_warn "graphify-mcp unavailable — fix: uv tool install \"graphifyy[gemini,mcp]\" --with \"mcp<2\" --force"
+        fi
+    else c_bad "graphify missing"; fi
+    if [ "$PLATFORM" = windows ]; then
+        c_warn "agentmemory skipped on native Windows (use WSL2)"
+    else
+        if have_native agentmemory; then c_ok "agentmemory $(agentmemory --version 2>/dev/null | head -1)"
+        elif have agentmemory; then c_bad "agentmemory resolves to a WINDOWS binary: $(where_is agentmemory) — install it inside WSL"
+        else c_bad "agentmemory missing"; fi
+        if [ "$PLATFORM" = wsl ] && have npm && ! have_native npm; then
+            c_bad "npm is the WINDOWS one ($(where_is npm)) — 'sudo apt-get install -y nodejs npm' inside WSL"
+        fi
+    fi
+
+    if [ "$PLATFORM" != windows ]; then
+        hdr "Memory server"
+        if curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
+            c_ok "responding on :3111"
+        else c_bad "not responding on :3111"; fi
+        svc_check
+        if [ -f "$AM/bin/iii" ] && have file && ! file "$AM/bin/iii" 2>/dev/null | grep -qE "Mach-O|ELF"; then
+            c_bad "iii engine binary looks foreign — delete it, it re-downloads"
+        fi
+    fi
+
+    hdr "Project: $(basename "$(pwd)")"
+    if git rev-parse --show-toplevel >/dev/null 2>&1; then
+        local root; root="$(git rev-parse --show-toplevel)"
+        [ -f "$root/graphify-out/graph.json" ] && c_ok "graph: $(graph_stats)" || c_warn "no graph — run: agent-tools init"
+        grep -q '"graphify hook-guard' "$root/.claude/settings.json" 2>/dev/null \
+            && c_ok "hook-guard wired (portable form)" || c_warn "no hook-guard in .claude/settings.json"
+        if [ -f "$root/.git/hooks/post-commit" ] && grep -q graphify "$root/.git/hooks/post-commit" 2>/dev/null; then
+            [ -f "$root/.git/graphify-auto-update-ENABLED" ] && c_warn "auto-update ENABLED" || c_ok "auto-update installed, disabled (default)"
+        else c_warn "no post-commit hook"; fi
+        if have claude; then
+            claude mcp list 2>/dev/null | grep -q "^graphify" && c_ok "graphify MCP wired" || c_warn "graphify MCP not wired"
+            claude mcp list 2>/dev/null | grep -q "^agentmemory" && c_ok "agentmemory MCP wired" || c_warn "agentmemory MCP not wired"
+        fi
+    else c_warn "not a git repository"; fi
+}
+
+# ---------------------------------------------------------------------------
+install_machine() {
+    hdr "Platform: $PLATFORM"
+    [ "$PLATFORM" = windows ] && c_warn "native Windows: graphify only. For agentmemory use WSL2 (upstream)."
+    if [ "$PLATFORM" = macos ] && ! have brew; then c_bad "install Homebrew first: https://brew.sh"; exit 1; fi
+
+    hdr "1. Prerequisites"
+    if have_native node; then c_ok "node $(node -v)"
+    elif confirm "Node.js (required for agentmemory; graphify works without it)"; then
+        install_node && c_ok "node $(node -v)" || c_warn "node install did not succeed"
+    fi
+    if have uv; then c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
+    elif confirm "uv (REQUIRED for graphify)"; then
+        install_uv && c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
+    fi
+    have uv || { c_bad "uv is required for graphify — nothing further to do"; exit 1; }
+
+    hdr "2. graphify (extras + the mcp<2 pin)"
+    if have graphify && [ "$ASSUME_YES" = 0 ] && [ "$NO_INSTALL" = 1 ]; then
+        c_ok "graphify $(graphify --version 2>/dev/null | awk '{print $2}') (left as-is)"
+    elif have graphify || confirm "graphify"; then
+        uv tool install "graphifyy[gemini,mcp]" --with "mcp<2" --force >/dev/null 2>&1 \
+            && c_ok "graphify installed" || c_bad "graphify install failed"
+    fi
+
+    # Two different reasons to skip, two different messages — sharing one text
+    # printed "use WSL2" on a Linux box, which is nonsense.
+    if [ "$PLATFORM" = windows ]; then
+        hdr "3. agentmemory — SKIPPED"
+        c_warn "native Windows: upstream ships no engine installer here and"
+        c_warn "\`agentmemory connect\` is unsupported. Use WSL2 and re-run there."
+        return
+    fi
+    if [ "$PLATFORM" = wsl ] && have npm && ! have_native npm; then
+        hdr "3. agentmemory — SKIPPED"
+        c_bad "npm here is the WINDOWS one: $(where_is npm)"
+        c_warn "Installing through it would put agentmemory in the Windows npm"
+        c_warn "prefix, and the Linux service would fail while looking fine."
+        c_warn "Install Node INSIDE WSL first, then re-run:"
+        c_warn "    sudo apt-get install -y nodejs npm"
+        return
+    fi
+    if ! have_native npm; then
+        hdr "3. agentmemory — SKIPPED"
+        c_warn "npm not available, so agentmemory cannot be installed."
+        c_warn "Install Node 18+ and re-run 'agent-tools install-machine'."
+        c_warn "graphify above is fully set up and works without it."
+        return
+    fi
+
+    hdr "3. agentmemory"
+    if have_native agentmemory; then c_ok "agentmemory $(agentmemory --version 2>/dev/null | head -1)"
+    elif confirm "agentmemory (persistent memory across sessions)"; then
+        npm install -g @agentmemory/agentmemory >/dev/null 2>&1
+        have agentmemory && c_ok "agentmemory installed" || c_bad "agentmemory install failed"
+    else
+        c_warn "skipped — graphify above is fully set up and works without it"
+        return
+    fi
+    # A store copied from another OS carries an unusable engine binary.
+    if [ -f "$AM/bin/iii" ] && have file && ! file "$AM/bin/iii" 2>/dev/null | grep -qE "Mach-O|ELF"; then
+        mkdir -p "$AM/.foreign"; mv "$AM/bin/iii" "$AM/.foreign/" 2>/dev/null
+        c_warn "moved foreign iii binary aside; it will re-download"
+    fi
+    rm -f "$AM/iii.pid" "$AM/worker.pid" "$AM/engine-state.json" 2>/dev/null
+
+    hdr "4. Memory server"
+    svc_install; local rc=$?
+    case $rc in
+        0) c_ok "service installed and started — $(svc_describe)" ;;
+        2) c_warn "no systemd here. Start manually (LAW: from $AM, or you get an empty store):"
+           echo "        cd $AM && agentmemory --tools core &" ;;
+        3) c_warn "no service manager for this platform" ;;
+    esac
+
+    hdr "5. Claude Code plugin (the hooks that capture memory)"
+    if have claude; then
+        if claude plugin list 2>/dev/null | grep -q agentmemory; then c_ok "agentmemory plugin present"
+        elif confirm "the agentmemory Claude Code plugin (the hooks that capture memory)"; then
+            claude plugin marketplace add rohitg00/agentmemory >/dev/null 2>&1
+            claude plugin install agentmemory@agentmemory >/dev/null 2>&1 && c_ok "agentmemory plugin installed"
+        fi
+    else c_warn "claude CLI not found — install it, then re-run"; fi
+
+    hdr "Next"
+    echo "  cd <your-project> && agent-tools init"
+    echo "  MANUAL: memory data does not migrate. See 'agent-tools help'."
+}
+
+# ---------------------------------------------------------------------------
+init_project() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
+    cd "$root" || exit 1
+    hdr "Project: $root  (platform: $PLATFORM)"
+
+    if ! grep -q "graphify-out/\*" .gitignore 2>/dev/null; then
+        cat >> .gitignore <<'GI'
+
+# Graphify knowledge graph. Derived output is ignored; the LLM-derived cache and
+# labels ARE committed — that is the expensive part (hours of extraction in a
+# couple of MB), and it lets a fresh clone rebuild the graph at zero LLM cost.
+# SYNTAX: never use `graphify-out/` or `graphify-out/**` — git will not descend
+# into an excluded directory, which silently kills every negation below.
+graphify-out/*
+!graphify-out/cache/
+graphify-out/cache/*
+!graphify-out/cache/semantic-deep/
+!graphify-out/.graphify_labels.json
+!graphify-out/.graphify_labels.json.sig
+GI
+        c_ok ".gitignore rules added"
+    else c_ok ".gitignore already configured"; fi
+
+    mkdir -p .claude
+    if ! grep -q "graphify hook-guard" .claude/settings.json 2>/dev/null; then
+        "$PY" - <<'PY'
+import json, os
+p = ".claude/settings.json"
+d = {}
+if os.path.exists(p):
+    try: d = json.load(open(p))
+    except Exception: d = {}
+hooks = d.setdefault("hooks", {}).setdefault("PreToolUse", [])
+have = json.dumps(hooks)
+# Bare `graphify` on PATH — an absolute path breaks on the next machine.
+for matcher, kind in (("Bash", "search"), ("Read|Glob", "read")):
+    if f"hook-guard {kind}" not in have:
+        hooks.append({"matcher": matcher,
+                      "hooks": [{"type": "command", "command": f"graphify hook-guard {kind}"}]})
+json.dump(d, open(p, "w"), indent=2)
+PY
+        c_ok "hook-guard added to .claude/settings.json"
+    else c_ok "hook-guard already present"; fi
+
+    if [ ! -f .git/hooks/post-commit ] || ! grep -q graphify .git/hooks/post-commit 2>/dev/null; then
+        cat > .git/hooks/post-commit <<'HK'
+#!/bin/bash
+# graphify auto-update — code only (AST, no LLM, no cost), never blocks a commit.
+# OPT-IN by design: absent gate file == disabled. An opt-out guard once vanished
+# and silently re-enabled itself, re-clustering the graph after a commit.
+REPO="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+ENABLE="$REPO/.git/graphify-auto-update-ENABLED"; LOG="$REPO/.git/graphify-auto-update.log"
+[ -f "$ENABLE" ] || exit 0
+if command -v pgrep >/dev/null 2>&1; then
+  pgrep -f "graphify (extract|update|label|cluster-only|watch)" >/dev/null 2>&1 && exit 0
+fi
+GRAPHIFY="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
+[ -x "$GRAPHIFY" ] || exit 0
+( cd "$REPO" && echo "[$(date '+%F %T')] update $(git rev-parse --short HEAD)" >> "$LOG" \
+  && "$GRAPHIFY" update . >> "$LOG" 2>&1 ) >/dev/null 2>&1 &
+exit 0
+HK
+        chmod +x .git/hooks/post-commit
+        c_ok "post-commit hook installed (DISABLED by default)"
+    else c_ok "post-commit hook already present"; fi
+
+    if have claude; then
+        local gmcp; gmcp="$(command -v graphify-mcp || echo "$BIN/graphify-mcp")"
+        claude mcp list 2>/dev/null | grep -q "^graphify" \
+            && c_ok "graphify MCP already wired" \
+            || { claude mcp add graphify -s local -- "$gmcp" >/dev/null 2>&1 && c_ok "graphify MCP wired (10 tools, ~1.5k tokens)"; }
+        if [ "$PLATFORM" != windows ]; then
+            claude mcp list 2>/dev/null | grep -q "^agentmemory" \
+                && c_ok "agentmemory MCP already wired" \
+                || { claude mcp add agentmemory -s local -e AGENTMEMORY_URL=http://localhost:3111 -- npx -y @agentmemory/mcp >/dev/null 2>&1 && c_ok "agentmemory MCP wired (8 tools, ~1k tokens)"; }
+        fi
+    fi
+
+    if [ -f graphify-out/graph.json ]; then
+        c_ok "graph exists: $(graph_stats)"
+    else
+        hdr "Building the code graph (AST only, no LLM, no cost)"
+        graphify update . 2>&1 | tail -3
+        c_ok "graph built: $(graph_stats)"
+        echo
+        c_warn "Docs are NOT indexed yet — that pass uses an LLM. When you want it:"
+        echo "      agent-tools refresh"
+    fi
+
+    hdr "Done"
+    echo "  agent-tools doctor    verify"
+    echo "  agent-tools refresh   after a batch of work"
+    echo "  touch .git/graphify-auto-update-ENABLED   to auto-update on commit"
+}
+
+# ---------------------------------------------------------------------------
+refresh() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
+    cd "$root" || exit 1
+    if proc_running "graphify (extract|update|label|cluster-only|watch)"; then
+        c_bad "another graphify run is active — wait and retry"; exit 1
+    fi
+    local mode="${1:-full}"
+    hdr "Before"; echo "  $(graph_stats)"
+
+    hdr "1/3 structure"     # LAW: structure first, always
+    if [ "$mode" = "--code-only" ]; then graphify update . || exit 1
+    else graphify extract . --backend claude-cli || exit 1; fi
+    c_ok "$(graph_stats)"
+
+    hdr "2/3 labels"        # LAW: `label`, never `cluster-only`; and always LAST
+    if [ "$mode" = "--code-only" ]; then c_warn "skipped (code-only); names may be hub-derived"
+    else graphify label . --backend claude-cli >/dev/null 2>&1 && c_ok "communities named" || c_warn "label failed"; fi
+
+    hdr "3/3 verify"
+    graphify tree >/dev/null 2>&1 && c_ok "GRAPH_TREE.html written"
+    local n; n="$(graphify query "architecture overview" 2>/dev/null | grep -c '^NODE')"
+    [ "${n:-0}" -gt 0 ] && c_ok "query returns $n nodes — graph answers" || c_bad "query returned nothing"
+}
+
+# ---------------------------------------------------------------------------
+case "${1:-help}" in
+    doctor)            doctor ;;
+    install-machine)   install_machine ;;
+    init)              init_project ;;
+    refresh)           shift; refresh "${1:-full}" ;;
+    platform)          echo "$PLATFORM" ;;   # used by the self-test
+    help|--help|-h)    usage; long_help ;;
+    version|--version) echo "agent-tools $VERSION" ;;
+    *) usage; exit 2 ;;
+esac

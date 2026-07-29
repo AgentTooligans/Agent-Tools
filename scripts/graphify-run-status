@@ -1,0 +1,45 @@
+#!/bin/bash
+# Live status for the detached graphify full run.
+#
+# Why this exists: the run's main log is only written when a whole pass ends,
+# so tailing it looks frozen for the entire job. The per-pass log is the live
+# one. Low CPU is also normal — the process blocks on the Claude CLI.
+#
+#   graphify-run-status          one-shot summary
+#   graphify-run-status -f       follow live chunk completions
+LOGDIR="$HOME/graphify-backups"
+PASS="$LOGDIR/.pass-current.log"
+STATUS="$LOGDIR/graphify-full-run.status"
+
+if [ "${1:-}" = "-f" ]; then
+    echo "following live progress (Ctrl-C to stop)…"
+    exec tail -f "$PASS"
+fi
+
+echo "phase   : $(cat "$STATUS" 2>/dev/null || echo unknown)"
+
+if pgrep -f "graphify-full-run.sh" >/dev/null 2>&1; then
+    echo "job     : RUNNING (pid $(pgrep -f 'graphify-full-run.sh' | head -1))"
+else
+    echo "job     : not running"
+fi
+
+total=$(grep -oE "chunk [0-9]+/([0-9]+) done" "$PASS" 2>/dev/null | tail -1 | sed 's|.*/||;s| done||')
+done_n=$(grep -cE "chunk [0-9]+/[0-9]+ done" "$PASS" 2>/dev/null)
+[ -n "${total:-}" ] && echo "chunks  : ${done_n:-0}/$total" || echo "chunks  : ${done_n:-0} (total not yet announced)"
+
+if [ -f "$PASS" ]; then
+    echo "last out: $(date -r "$PASS" '+%H:%M:%S') ($(( ($(date +%s) - $(stat -f %m "$PASS")) / 60 )) min ago)"
+fi
+
+if pgrep -f "claude -p" >/dev/null 2>&1; then
+    et=$(ps -o etime= -p "$(pgrep -f 'claude -p' | head -1)" 2>/dev/null | tr -d ' ')
+    echo "llm     : call in flight (${et:-?} elapsed)  <- low CPU here is NORMAL"
+else
+    echo "llm     : between calls"
+fi
+
+echo "power   : $(pmset -g batt 2>/dev/null | sed -n '1p' | sed "s/Now drawing from //")"
+echo
+echo "last 3 lines:"
+tail -3 "$PASS" 2>/dev/null | sed 's/^/  /'
