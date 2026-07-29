@@ -162,3 +162,64 @@ instruction file. `init` writes a rule saying so, and `doctor` warns when
 `CLAUDE.md` exceeds ~200 lines / 10 KB or contains a line over 2,000 characters
 (a good sign of a pasted log). It never edits the file — see
 [USAGE.md](USAGE.md).
+
+
+---
+
+## Multiple machines — what actually travels
+
+**Investigated 2026-07-29.** Short answer: **memory does not travel.**
+
+The backend *choice* is machine-wide and portable-by-config
+(`~/.config/agent-tools/config`, read identically from every project — there is
+no per-project backend, deliberately). The memory *itself* is another matter.
+
+| | where it lives | travels? |
+|---|---|---|
+| claude-mem store | `~/.claude-mem/` (SQLite + Chroma) | **no** |
+| agentmemory store | the server's working directory | **no** |
+| transcripts | `~/.claude/projects/` | **no** — so `claude --resume` history is per-machine |
+| graphify semantic cache | `graphify-out/cache/` **if committed** | **yes** |
+| git hooks | `.git/hooks/` | **no** — git never clones hooks; re-run `agent-tools init` |
+
+### claude-mem has two runtimes, and only one is local
+
+```
+npx claude-mem install --runtime worker    # default: local SQLite + Chroma
+npx claude-mem install --runtime server    # Docker postgres + redis + API key
+```
+
+The **server** runtime is the real multi-machine answer: several machines point
+at one backend instead of each keeping a private SQLite. It generates an API key
+and injects the IDE MCP config.
+
+The `sync_*` tables in the local store (`sync_outbox`, `sync_state`,
+`sync_entity_heads`, `sync_dead_letter`) are scaffolding for that path. On a
+worker-runtime install they are **inert**: observed `sync_state = 0` with 16
+rows queued in `sync_outbox` that nothing drains. Do not read a populated
+outbox as "sync is working."
+
+### Carrying memory across without a server
+
+1. **`agent-tools memory export <dir>`** — verified 2026-07-29 to copy stored
+   text **verbatim** (3/3 sampled fields matched byte-for-byte); it does not
+   re-summarize. The summarization loss happened once, upstream, at ingest.
+   This is your portable, exact record — commit it or sync it to a vault.
+2. **`scripts/adopt-session.sh --into <project>`** — moves an individual session
+   so `claude --resume` finds it in another project and claude-mem attributes
+   memory there.
+
+## Telemetry
+
+**claude-mem sends anonymous telemetry, and it is ON by default.**
+
+```bash
+npx claude-mem telemetry status     # Telemetry: ENABLED / Decided by: default
+npx claude-mem telemetry disable
+```
+
+It reports a random install UUID (`~/.claude-mem/telemetry.json`), documented at
+docs.claude-mem.ai/telemetry. Noted because it is easy to miss during install,
+and because caveman — installed alongside — states the opposite policy for
+itself. Neither claim was independently verified here; both are the projects'
+own statements.
