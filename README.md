@@ -17,6 +17,7 @@ agent-tools help                          # the reasoning behind every default
 
 `agent-tools` is a **single self-contained bash script**. No dependencies beyond
 bash, python, and the tools it installs. Copy it anywhere and it works.
+PowerShell users get the same commands via `agent-tools.ps1`.
 
 ---
 
@@ -89,8 +90,8 @@ than hanging on a prompt nobody can answer.
 |---|---|---|
 | macOS | full (launchd) | ✅ |
 | Linux | full (systemd --user) | ✅ Ubuntu 24.04 |
-| WSL2 | full (systemd --user) | ✅ Win 11 + Ubuntu 26.04 |
-| Windows native | **graphify only** | ⚠️ not yet verified |
+| WSL2 | full (systemd --user) | ✅ Win 11 + Ubuntu 26.04 & 24.04 |
+| Windows native | **graphify only** | ✅ Win 11 + Git Bash |
 
 Native Windows is limited by **agentmemory upstream**, not by this tool: it
 ships no PowerShell/scoop/winget installer for its engine, and

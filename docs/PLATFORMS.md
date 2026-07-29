@@ -5,7 +5,7 @@
 | macOS | full | launchd user agent | ✅ macOS 15 (Apple Silicon) |
 | Linux | full | systemd `--user` | ✅ Ubuntu 24.04 container |
 | WSL2 | full | systemd `--user` | ✅ Windows 11 + Ubuntu 26.04, systemd on |
-| Windows native | **graphify only** | none | ⚠️ **not yet verified** |
+| Windows native | **graphify only** | none | ✅ Win 11 + Git Bash |
 
 "Verified" means the tool was actually run there, not that it should work.
 
@@ -161,8 +161,42 @@ Its engine has no PowerShell, scoop or winget package; you fetch
 So on native Windows `agent-tools` sets up graphify and says so plainly rather
 than pretending. **Use WSL2.**
 
-Known unknowns on native Windows (Git Bash), untested as of 2026-07-29:
+### Verified on Windows 11 + Git Bash (2026-07-29)
 
-- the `uv` install path (the Astral installer is a `sh` script)
-- `python` vs `python3` — handled in code, unverified in practice
-- path translation when registering MCP servers
+| step | result |
+|---|---|
+| platform detection | ✅ `MINGW64_NT-10.0` → `windows` |
+| `doctor` | ✅ degrades honestly, no crash |
+| `install-machine` | ✅ uv 0.12.0 via the Astral installer, graphify with extras + pin |
+| agentmemory | ✅ correctly SKIPPED with the reason |
+| `init` | ✅ gitignore, hook-guard, hook, MCP, AGENTS.md, graph built |
+| `graphify query` | ✅ returned the expected nodes |
+| `graphify affected` | ✅ `.run() [calls] src/app.py:L6` |
+
+**The Windows trap that nearly broke it: `python3` is a Microsoft Store stub.**
+
+```
+python3 -> AppData/Local/Microsoft/WindowsApps/python3     (stub)
+python  -> AppData/Local/Programs/Python/Python312/python  (real, 3.12.10)
+```
+
+The stub is on PATH and answers every call with *"Python was not found; run
+without arguments to install from the Microsoft Store"*. An existence check
+(`command -v python3`) picks it over the real interpreter sitting next to it. So
+the picker now **executes** a probe (`python -c pass`) and takes the first one
+that actually runs, trying `python3`, `python`, then `py`.
+
+**If no Python at all:** `uv python install` provisions one — no admin rights and
+no extra package manager, since uv is already required for graphify.
+`install-machine` offers this automatically.
+
+Note graphify itself does not need a system Python (uv gives it its own);
+`agent-tools` needs one for reading the graph and writing
+`.claude/settings.json`.
+
+### PowerShell
+
+`agent-tools.ps1` gives PowerShell users the same commands, preferring WSL and
+falling back to Git Bash. Verified: `version`, `doctor` and `init` all ran from
+`C:\Users\...\ps test repo` — spaces included — translating correctly to
+`/mnt/c/...`.
