@@ -26,9 +26,28 @@ done
 
 case ":$PATH:" in
     *":$DEST:"*) echo "PATH: ok" ;;
-    *) echo
-       echo "WARNING: $DEST is not on your PATH. Add this to your shell profile:"
-       echo "    export PATH=\"$DEST:\$PATH\"" ;;
+    *)
+       # Ubuntu's default .profile only adds ~/.local/bin if it ALREADY existed
+       # at login, so a fresh install is invisible until the next session. Offer
+       # to fix it rather than just warning.
+       echo
+       echo "$DEST is not on your PATH."
+       line="export PATH=\"$DEST:\$PATH\""
+       prof=""
+       for f in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
+           [ -f "$f" ] && { prof="$f"; break; }
+       done
+       if [ -n "$prof" ] && [ -t 0 ]; then
+           printf "Add it to %s? [Y/n] " "$prof"
+           read -r ans
+           case "$ans" in [nN]*) ;; *)
+               grep -qF "$DEST" "$prof" 2>/dev/null || printf '\n# agent-tools\n%s\n' "$line" >> "$prof"
+               echo "added to $prof — run: source $prof" ;;
+           esac
+       else
+           echo "Add this to your shell profile:"
+           echo "    $line"
+       fi ;;
 esac
 
 echo
