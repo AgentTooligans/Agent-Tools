@@ -1,7 +1,20 @@
 # The memory server: startup, restarts, and reboots
 
-Only **agentmemory** runs as a service. graphify is a CLI — it runs when you
-call it and exits. Nothing to supervise.
+Which service you have depends on your memory backend. graphify is a CLI — it
+runs when you call it and exits, so there is never anything to supervise there.
+
+| backend | what runs | supervised? |
+|---|---|---|
+| **claude-mem** (default) | worker on :37701 + web UI | **no unit** — `npx claude-mem start` |
+| **agentmemory** | server on :3111 | yes — launchd / systemd |
+
+**claude-mem** needs no launchd or systemd unit. Its installer says plainly:
+*"Worker autostart skipped — start it manually with `npx claude-mem start`."*
+That is lighter than agentmemory, but it is **not nothing**: if the worker is
+not running, capture does not happen. `agent-tools doctor` checks :37701.
+
+Everything below concerns **agentmemory**, which is the backend that genuinely
+needs supervising.
 
 ---
 

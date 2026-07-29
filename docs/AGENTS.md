@@ -5,6 +5,16 @@ because that is what it was built against, but nothing is Claude-specific.
 
 ---
 
+## claude-mem
+
+Also multi-agent, despite the name. Its package ships adapters for
+`claude-code`, `codex`, `cursor`, `copilot`, `gemini`, `windsurf`, `warp`,
+`opencode`, `openclaw` and `antigravity`, and includes a `.codex-plugin`. Its
+own tagline is *"Persistent Context Across Sessions for Every Agent"*.
+
+`npx claude-mem install` detects installed agents and wires them itself, so
+there is usually nothing to do per agent.
+
 ## agentmemory
 
 It speaks **MCP** and has a `connect` command with adapters for a long list of

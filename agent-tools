@@ -25,7 +25,7 @@
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=3.0.0
+VERSION=3.1.0
 
 BIN="$HOME/.local/bin"
 AM="$HOME/.agentmemory"
@@ -72,9 +72,11 @@ NO_INSTALL=0
 # each hooks the session lifecycle, so running both means double capture and
 # double per-tool-call overhead.
 #
-#   claude-mem   default. Self-spawns its worker (no supervised service, no
-#                cwd trap), injects context at session start, ~3.4x the
-#                adoption. No bulk importer — starts from install day.
+#   claude-mem   default. Runs a worker on :37701 (start with `npx claude-mem
+#                start` — no launchd/systemd unit needed, and no cwd trap),
+#                injects context at session start, ~3.4x the adoption. No bulk
+#                importer: it starts from install day. Ships /learn-codebase to
+#                ingest a repo.
 #   agentmemory  opt-in. Needs a supervised server whose WORKING DIRECTORY
 #                decides the store location, but has `import-jsonl` to rebuild
 #                from past transcripts.
@@ -111,6 +113,18 @@ remember_backend() {
 # both are present (the user asked for a loud warning, not a hard block).
 cm_installed() { have claude-mem || [ -d "$HOME/.claude-mem" ]; }
 am_installed() { have agentmemory || [ -d "$AM/data" ]; }
+
+# INSTALLED is not the problem — ACTIVE is. A backend that is present but has
+# its hooks disabled and its service stopped costs nothing and is a useful
+# archive. Only two *capturing* backends duplicate work. Warning on mere
+# presence cries wolf at exactly the person who did the right thing.
+cm_active() { curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; }
+am_active() {
+    curl -sf -m 3 http://localhost:3111/agentmemory/health >/dev/null 2>&1 && return 0
+    # Plugin enabled (not merely installed) also means hooks fire.
+    have claude || return 1
+    claude plugin list 2>/dev/null | grep -A3 "agentmemory@agentmemory" | grep -qi "enabled"
+}
 for _a in "$@"; do
     case "$_a" in
         -y|--yes)     ASSUME_YES=1 ;;
@@ -282,7 +296,7 @@ Flags (refresh):
                   with the others: `refresh --deep --detach`.
 
 Memory backend (install-machine):
-  --memory=claude-mem   default. self-spawning worker, context injection
+  --memory=claude-mem   default. light worker on :37701, context injection
   --memory=agentmemory  supervised server, has a bulk transcript importer
   --memory=none         graphify only
   Your choice is remembered in ~/.config/agent-tools/config.
@@ -623,19 +637,32 @@ doctor() {
     fi
 
     hdr "Memory backend: $MEMORY_BACKEND"
-    if cm_installed && am_installed; then
-        c_bad "BOTH claude-mem and agentmemory are installed."
-        c_bad "If both are capturing, every tool call fires two hook sets into"
-        c_bad "two stores — double overhead and duplicated memory."
-        c_warn "Keep one active. Remove the other:"
-        c_warn "    npx claude-mem uninstall"
-        c_warn "    claude plugin uninstall agentmemory@agentmemory"
+    if cm_active && am_active; then
+        c_bad "BOTH backends are ACTIVELY CAPTURING."
+        c_bad "Every tool call fires two hook sets into two stores — double"
+        c_bad "overhead and duplicated memory."
+        c_warn "Stop one:"
+        c_warn "    claude plugin disable agentmemory@agentmemory --scope local"
+        c_warn "    (or)  npx claude-mem stop"
+    elif cm_installed && am_installed; then
+        # Both present, one inert. That is a legitimate setup: the inactive one
+        # is an archive you can still consult by re-enabling it.
+        if cm_active; then c_ok "agentmemory installed but INACTIVE (archive) — no conflict"
+        elif am_active; then c_ok "claude-mem installed but INACTIVE — no conflict"
+        else c_warn "both installed, neither active"; fi
     fi
     case "$MEMORY_BACKEND" in
       claude-mem)
         cm_installed && c_ok "claude-mem installed" || c_bad "claude-mem missing — run: agent-tools install-machine"
         [ -d "$HOME/.claude-mem" ] && c_ok "store: ~/.claude-mem" || c_warn "no store yet at ~/.claude-mem"
-        c_ok "no supervised service needed (worker self-spawns)" ;;
+        # Correction (2026-07-29): the installer says "Worker autostart skipped
+        # — start it manually with npx claude-mem start", so a worker IS wanted.
+        # It is lighter than agentmemory's supervised server, but not nothing.
+        if curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; then
+            c_ok "worker responding on :37701"
+        else
+            c_warn "worker not responding — start it:  npx claude-mem start"
+        fi ;;
       none) c_warn "no memory backend selected (--memory=none)" ;;
     esac
 
@@ -922,18 +949,36 @@ HK
         claude mcp list 2>/dev/null | grep -q "^graphify" \
             && c_ok "graphify MCP already wired" \
             || { claude mcp add graphify -s local -- "$gmcp" >/dev/null 2>&1 && c_ok "graphify MCP wired (10 tools, ~1.5k tokens)"; }
-        if [ "$PLATFORM" != windows ]; then
-            claude mcp list 2>/dev/null | grep -q "^agentmemory" \
-                && c_ok "agentmemory MCP already wired" \
-                || { claude mcp add agentmemory -s local -e AGENTMEMORY_URL=http://localhost:3111 -- npx -y @agentmemory/mcp >/dev/null 2>&1 && c_ok "agentmemory MCP wired (8 tools, ~1k tokens)"; }
-        fi
+        # Wire the MCP for the SELECTED backend only. claude-mem registers its
+        # own MCP during `claude-mem install`, so we must not add a second
+        # entry; agentmemory needs one pointed at its server.
+        case "$MEMORY_BACKEND" in
+          agentmemory)
+            if [ "$PLATFORM" != windows ]; then
+                claude mcp list 2>/dev/null | grep -q "^agentmemory" \
+                    && c_ok "agentmemory MCP already wired" \
+                    || { claude mcp add agentmemory -s local -e AGENTMEMORY_URL=http://localhost:3111 -- npx -y @agentmemory/mcp >/dev/null 2>&1 && c_ok "agentmemory MCP wired (8 tools, ~1k tokens)"; }
+            fi ;;
+          claude-mem)
+            c_ok "claude-mem wires its own MCP (nothing to add here)"
+            # A leftover entry from a previous backend would keep a dead server
+            # in every session's tool list.
+            if claude mcp list 2>/dev/null | grep -q "^agentmemory"; then
+                c_warn "an agentmemory MCP entry is still wired but the backend is claude-mem"
+                c_warn "    claude mcp remove agentmemory -s local"
+            fi ;;
+        esac
     fi
 
     # --- agent instructions -------------------------------------------------
     # MCP tools alone are passive: an agent CAN call them but often won't. The
     # durable fix is the instruction file the agent already reads every session.
+    # CLAUDE.md FIRST when it exists: it is what Claude Code actually reads, and
+    # it is the file that bloats — putting a "keep this lean" rule in a
+    # different file than the one growing is theatre. AGENTS.md is the
+    # cross-agent standard, so it is the fallback and what we create fresh.
     local instr=""
-    for f in AGENTS.md CLAUDE.md .cursorrules; do [ -f "$f" ] && { instr="$f"; break; }; done
+    for f in CLAUDE.md AGENTS.md .cursorrules; do [ -f "$f" ] && { instr="$f"; break; }; done
     [ -z "$instr" ] && instr="AGENTS.md"
     if grep -q "agent-tools:managed" "$instr" 2>/dev/null; then
         c_ok "agent instructions already in $instr"
@@ -1247,9 +1292,21 @@ memory_stop_agentmemory() {
     esac
     ( cd "$AM" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
     if have claude && claude plugin list 2>/dev/null | grep -q "agentmemory@agentmemory"; then
-        claude plugin uninstall agentmemory@agentmemory >/dev/null 2>&1 \
-          && c_ok "agentmemory plugin removed (its hooks no longer fire)" \
-          || c_warn "could not remove the plugin — do it manually: claude plugin uninstall agentmemory@agentmemory"
+        # `uninstall` FAILS when the plugin is enabled at PROJECT scope (it lives
+        # in a repo's .claude/settings.json, shared with the team). Disabling at
+        # local scope always works and stops the hooks immediately, which is what
+        # actually matters. Observed 2026-07-29.
+        if claude plugin uninstall agentmemory@agentmemory >/dev/null 2>&1; then
+            c_ok "agentmemory plugin removed (its hooks no longer fire)"
+        elif claude plugin disable agentmemory@agentmemory --scope local >/dev/null 2>&1; then
+            c_ok "agentmemory plugin disabled for you (hooks stopped)"
+            c_warn "It is still enabled in a project's .claude/settings.json."
+            c_warn "Remove \"agentmemory@agentmemory\" from enabledPlugins there so the"
+            c_warn "repo does not load a backend you no longer use."
+        else
+            c_warn "could not disable the plugin — do it manually:"
+            c_warn "    claude plugin disable agentmemory@agentmemory --scope local"
+        fi
     fi
     c_ok "agentmemory store preserved at $AM (nothing deleted)"
 }

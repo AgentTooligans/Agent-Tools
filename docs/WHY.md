@@ -197,8 +197,11 @@ bug you are hitting, a feature you want) and can absorb a re-extraction window.
 
 - `graph.html` is skipped above **5,000 nodes**. Use `graphify tree` →
   `GRAPH_TREE.html`, which has no cap.
-- `--wiki` appears in the skill's usage text but is **not implemented** in the
-  0.9.29 CLI.
+- `wiki` and `obsidian` ARE implemented — as `graphify export <format>`
+  subcommands, not top-level flags. (An earlier version of this document said
+  `--wiki` did not exist; that was wrong, and came from grepping only the
+  top-level help.) Full list: `html`, `callflow-html`, `obsidian`, `wiki`,
+  `svg`, `graphml`, `neo4j`, `falkordb`.
 - The `hook-guard` PreToolUse hook is **advisory only** — it prints a nudge and
   exits. It never rebuilds anything, so it cannot conflict with a running job.
 

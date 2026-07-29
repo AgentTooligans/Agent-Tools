@@ -61,7 +61,7 @@ passive, and the instruction file is what an agent actually reads every session.
 | `.gitignore` rules | ignore the generated graph, **keep** the expensive LLM cache |
 | `.claude/settings.json` | hook-guard nudging the agent to query the graph before grepping |
 | `.git/hooks/post-commit` | auto-refresh the code graph — **installed disabled** |
-| MCP servers (project scope) | 18 tools: 10 graph, 8 memory |
+| MCP servers (project scope) | graphify (10 tools, ~1.5k tokens); the memory backend wires its own |
 | initial code graph | AST only — no LLM, no cost |
 
 Docs are deliberately **not** indexed by `init`, because that pass costs tokens.
@@ -163,10 +163,81 @@ rm    .git/graphify-auto-update-ENABLED    # disable (the default)
 
 ---
 
+## Memory backend — you choose
+
+Two tools do this job well, and they must not both be active: each hooks the
+session lifecycle, so running both means double capture and double per-tool-call
+overhead.
+
+| | **claude-mem** (default) | **agentmemory** |
+|---|---|---|
+| adoption | ~88.9k stars | ~25.9k stars |
+| service | worker on :37701 — start with `npx claude-mem start` (no launchd/systemd unit) | supervised server (launchd/systemd) |
+| store | `~/.claude-mem/` (SQLite + Chroma) | follows the server's **working directory** |
+| context injection | **automatic at session start** | opt-in (costs tokens) |
+| bulk import of past sessions | none — starts from install day | `import-jsonl` |
+| export to Markdown | none | yes (`agent-tools memory export`) |
+
+```bash
+agent-tools install-machine --memory=claude-mem    # default
+agent-tools install-machine --memory=agentmemory
+agent-tools install-machine --memory=none          # graphify only
+```
+
+Your choice is remembered in `~/.config/agent-tools/config`.
+
+### Switching backends
+
+```bash
+agent-tools memory status                 # which one, what is installed
+agent-tools memory export ~/notes         # memories -> portable Markdown
+agent-tools memory switch claude-mem      # machine-wide change
+```
+
+**Switching is machine-wide, not per-project** — both backends hook at user
+scope and keep one global store, so a per-project split would fragment your
+history and require both to stay hooked.
+
+**The switch is asymmetric**, and the tool says so rather than pretending:
+
+- **claude-mem → agentmemory**: memories can be POSTed to `/agentmemory/remember`.
+- **agentmemory → claude-mem**: claude-mem has *no ingest API*. The switch
+  exports your memories to Markdown (the exact record), then converts them by
+  synthesising a transcript and feeding claude-mem's own Stop hook, so it
+  summarises and embeds them natively. **claude-mem compresses on ingest**, so
+  the converted copies are summaries — keep the Markdown as ground truth.
+
+Switching away from agentmemory stops **and disables** its launchd/systemd
+service and removes its plugin so the hooks stop firing. **The store is never
+deleted**, so you can switch back.
+
+## Obsidian
+
+```bash
+agent-tools obsidian ~/Documents/MyVault/agent-tools
+agent-tools obsidian ~/vault --graph-only
+```
+
+Exports the codebase graph as wiki-linked notes (Obsidian's graph view then
+renders your architecture) and your memories as notes with tags and front
+matter, plus an index. On demand only — nothing writes to your vault unless you
+ask. It is a **snapshot for humans**: agents keep querying `graph.json` and the
+live memory store, not the vault.
+
+## Keeping CLAUDE.md lean
+
+`init` writes a rule telling the agent that `CLAUDE.md` / `AGENTS.md` is for
+build, test and lint commands and hard constraints — not session logs, status
+updates or narrative history, which belong in memory or `docs/`.
+
+`doctor` measures the file and warns past ~200 lines / 10 KB, and flags any line
+over 2,000 characters as a likely pasted log. **It never edits your file.**
+
 ## Documentation
 
 | doc | what's in it |
 |---|---|
+| [docs/MEMORY.md](docs/MEMORY.md) | choosing, switching and converting between memory backends |
 | [docs/USAGE.md](docs/USAGE.md) | when each tool earns its keep, what graphify is **bad** at, telling agents to use them, stale-graph behavior |
 | [docs/SERVICES.md](docs/SERVICES.md) | startup, restarts, reboots — including the WSL-after-Windows-restart gap |
 | [docs/UPDATING.md](docs/UPDATING.md) | updating each component, and why upgrading graphify can cost hours |

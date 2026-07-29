@@ -74,9 +74,10 @@ useless.** Knowing the boundary is the whole trick.
 
 ---
 
-## agentmemory — how to use it well
+## Memory — how to use it well
 
-It captures automatically through session hooks; you rarely call it directly.
+Both backends capture automatically through session hooks; you rarely call
+them directly. See [MEMORY.md](MEMORY.md) for choosing and switching.
 
 **Do:**
 
@@ -108,9 +109,9 @@ ones. Search still finds them.
 Agents do **not** automatically know these tools exist or when to prefer them.
 Four mechanisms, weakest to strongest:
 
-**1. MCP tools (passive).** After `agent-tools init` the agent *can* call 10
-graph tools and 8 memory tools. It will sometimes choose to. This alone is not
-reliable.
+**1. MCP tools (passive).** After `agent-tools init` the agent *can* call
+graphify's 10 graph tools, plus whatever your memory backend registers. It will
+sometimes choose to. This alone is not reliable.
 
 **2. graphify's hook-guard (active).** Installed by `init`. Before any
 Bash/Read/Glob it injects:

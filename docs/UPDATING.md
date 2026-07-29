@@ -36,6 +36,20 @@ agent-tools refresh       # rebuild; re-extracts only what the cache missed
 
 ---
 
+## claude-mem
+
+```bash
+npx -y claude-mem@latest install     # upgrade in place
+npx claude-mem start                 # restart the worker afterwards
+```
+
+Its store (`~/.claude-mem/claude-mem.db` + Chroma index) is untouched by an
+upgrade. Check afterwards with `agent-tools doctor`, which verifies the worker
+is answering on :37701.
+
+Close all Claude Code sessions before **uninstalling** — its own installer
+warns that active hooks will recreate `~/.claude-mem` underneath you.
+
 ## agentmemory
 
 ```bash
