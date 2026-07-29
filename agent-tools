@@ -286,8 +286,8 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
   agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
   agent-tools obsidian DIR      export graph + memories into an Obsidian vault
-  agent-tools caveman [CMD]    output-token compression: status|install|update|uninstall
-  agent-tools update [WHAT]    update all|graphify|memory|caveman|self
+  agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
+  agent-tools update [WHAT]     update all|graphify|memory|caveman|self
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -744,9 +744,25 @@ doctor() {
         if [ -f "$root/.git/hooks/post-commit" ] && grep -q graphify "$root/.git/hooks/post-commit" 2>/dev/null; then
             [ -f "$root/.git/graphify-auto-update-ENABLED" ] && c_warn "auto-update ENABLED" || c_ok "auto-update installed, disabled (default)"
         else c_warn "no post-commit hook"; fi
+        [ -f "$root/.git/hooks/post-checkout" ] && grep -q graphify "$root/.git/hooks/post-checkout" 2>/dev/null \
+            && c_ok "post-checkout hook installed (branch switches)" \
+            || c_warn "no post-checkout hook — re-run: agent-tools init"
         if have claude; then
             claude mcp list 2>/dev/null | grep -q "^graphify" && c_ok "graphify MCP wired" || c_warn "graphify MCP not wired"
-            claude mcp list 2>/dev/null | grep -q "^agentmemory" && c_ok "agentmemory MCP wired" || c_warn "agentmemory MCP not wired"
+            # Only agentmemory needs an MCP entry of ours. claude-mem registers
+            # its own, so "agentmemory MCP not wired" under claude-mem is the
+            # CORRECT state -- reporting it as a warning trains people to ignore
+            # doctor output.
+            case "$MEMORY_BACKEND" in
+              agentmemory)
+                claude mcp list 2>/dev/null | grep -q "^agentmemory" \
+                    && c_ok "agentmemory MCP wired" || c_warn "agentmemory MCP not wired" ;;
+              claude-mem)
+                if claude mcp list 2>/dev/null | grep -q "^agentmemory"; then
+                    c_warn "stale agentmemory MCP entry (backend is claude-mem)"
+                    echo "        claude mcp remove agentmemory -s local"
+                else c_ok "memory MCP: claude-mem registers its own"; fi ;;
+            esac
         fi
     else c_warn "not a git repository"; fi
 }
