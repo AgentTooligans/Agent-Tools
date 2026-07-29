@@ -269,6 +269,7 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools memory status     which backend, what is installed
   agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
   agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
+  agent-tools obsidian DIR      export graph + memories into an Obsidian vault
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -1135,6 +1136,78 @@ refresh() {
 }
 
 # ---------------------------------------------------------------------------
+# Obsidian export: put BOTH halves of what these tools know into one vault.
+#
+#   graph    -> `graphify export obsidian --dir VAULT/graph`
+#               one note per node/community, wiki-linked, so Obsidian's own
+#               graph view renders your codebase structure.
+#   memories -> memory-export.py, as notes with YAML front matter, tags and
+#               [[links]] on shared concepts.
+#
+# Deliberately ON DEMAND. Nothing writes to your vault unless you ask, because
+# a vault is a place people curate by hand and surprise writes are rude. It is
+# also a SNAPSHOT: the vault drifts from the live store until you re-run this,
+# and the agent still queries graph.json, never your vault.
+# ---------------------------------------------------------------------------
+obsidian_export() {
+    local vault="${1:-}"
+    if [ -z "$vault" ]; then
+        c_bad "usage: agent-tools obsidian <vault-dir> [--graph-only|--memory-only]"
+        echo "  e.g. agent-tools obsidian ~/Documents/MyVault/agent-tools"
+        return 2
+    fi
+    local mode="${2:-both}"
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$(pwd)"
+    local project; project="$(basename "$root")"
+
+    mkdir -p "$vault" || { c_bad "cannot create $vault"; return 1; }
+    hdr "Obsidian export -> $vault"
+
+    local did_graph=0 did_mem=0
+
+    if [ "$mode" != "--memory-only" ]; then
+        if [ -f "$root/graphify-out/graph.json" ]; then
+            local gdir="$vault/$project-graph"
+            if (cd "$root" && graphify export obsidian --dir "$gdir" >/dev/null 2>&1); then
+                c_ok "graph -> $gdir ($(find "$gdir" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"
+                did_graph=1
+            else
+                c_warn "graph export failed (is the graph built? agent-tools init)"
+            fi
+        else
+            c_warn "no graph in this project — skipping graph export"
+        fi
+    fi
+
+    if [ "$mode" != "--graph-only" ]; then
+        if [ "$MEMORY_BACKEND" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
+            memory_export "$vault/memories" >/dev/null 2>&1 \
+              && { c_ok "memories -> $vault/memories ($(find "$vault/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"; did_mem=1; } \
+              || c_warn "memory export failed"
+        elif [ "$MEMORY_BACKEND" = claude-mem ]; then
+            # claude-mem keeps SQLite + Chroma and exposes no export API, so
+            # there is nothing to convert. Say so rather than failing quietly.
+            c_warn "claude-mem has no export API — memories cannot be exported to Markdown."
+            c_warn "Its store is SQLite at ~/.claude-mem. Only agentmemory can export today."
+        else
+            c_warn "memory backend not reachable — skipping memories"
+        fi
+    fi
+
+    # A vault entry point, so the export is navigable rather than a pile.
+    {
+        printf '# %s — agent-tools export\n\n' "$project"
+        printf '_Snapshot taken %s. Re-run `agent-tools obsidian %s` to refresh._\n\n' "$(date '+%Y-%m-%d %H:%M')" "$vault"
+        [ "$did_graph" = 1 ] && printf -- '- [[%s-graph/INDEX|Codebase graph]] — structure, communities, god nodes\n' "$project"
+        [ "$did_mem" = 1 ]   && printf -- '- [[memories/INDEX|Memories]] — decisions and rationale\n'
+        printf '\n> These notes are a snapshot for humans. Agents query the live\n'
+        printf '> graph (`graphify-out/graph.json`) and the live memory store,\n'
+        printf '> not this vault.\n'
+    } > "$vault/INDEX.md"
+    c_ok "vault index -> $vault/INDEX.md"
+}
+
+# ---------------------------------------------------------------------------
 # Memory backend management.
 #
 # Switching is SYSTEM-WIDE, not per project: both backends hook the session
@@ -1209,11 +1282,27 @@ memory_switch() {
         c_warn "claude-mem -> agentmemory: memories can be POSTed to /agentmemory/remember."
         c_warn "Run this after agentmemory is up, against the exported notes."
     else
-        c_bad "claude-mem has NO ingest API — memories cannot be injected."
-        c_warn "Your exported Markdown is the durable record. To rebuild memory"
-        c_warn "inside claude-mem, replay past sessions (costs tokens, unverified):"
-        c_warn "    scripts/claude-mem-import-transcripts.sh          # dry run"
-        c_warn "    scripts/claude-mem-import-transcripts.sh --limit 1 --go"
+        # claude-mem has no ingest API, so we go through its own pipeline:
+        # synthesise a transcript containing the memories and hand it to the
+        # Stop hook. It then summarises and embeds them natively, which is the
+        # only way they end up searchable rather than half-imported.
+        local conv; conv="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")/agentmemory-to-claude-mem.py"
+        [ -f "$conv" ] || conv="$(dirname "$0")/scripts/agentmemory-to-claude-mem.py"
+        if [ -f "$conv" ] && [ -n "$PY" ]; then
+            c_warn "claude-mem has no ingest API. Converting via its own hook pipeline"
+            c_warn "(it SUMMARISES on ingest, so text is compressed, not verbatim —"
+            c_warn " the Markdown export above stays the exact record)."
+            "$PY" "$conv" --cwd "$(pwd)" --dry-run 2>&1 | sed 's/^/    /'
+            if confirm "the converted memories into claude-mem now"; then
+                "$PY" "$conv" --cwd "$(pwd)" --go 2>&1 | sed 's/^/    /'
+            else
+                c_warn "skipped — run later:  $conv --go"
+            fi
+        else
+            c_warn "converter not found; your Markdown export is the record"
+        fi
+        c_warn "To also replay raw past sessions (optional, costs tokens):"
+        c_warn "    scripts/claude-mem-import-transcripts.sh   # dry run first"
     fi
 
     # 3. Disable the outgoing backend, install the incoming one.
@@ -1278,6 +1367,7 @@ case "${1:-help}" in
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;
     status)            status_cmd ;;
+    obsidian)          shift; obsidian_export "${1:-}" "${2:-both}" ;;
     memory)            shift
                        case "${1:-status}" in
                          export) shift; memory_export "${1:-}" ;;
