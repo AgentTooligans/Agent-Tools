@@ -163,3 +163,20 @@ agent-tools refresh           # structure -> labels -> viz -> verify
 ```
 
 Rule of thumb: refresh **before you lean on the graph**, not on a schedule.
+
+### Choosing a tier
+
+```bash
+agent-tools refresh --code-only   # structure only, free, ~1 min
+agent-tools refresh               # + docs/images + community naming
+agent-tools refresh --deep        # + aggressive inferred edges
+```
+
+`--deep` is worth it when you want the graph to connect *concepts* across prose
+and code rather than just structure. It is the most expensive thing here: its
+cache namespace is separate, so the first deep run re-reads every document.
+Above roughly a hundred docs, prefer `scripts/graphify-full-run.sh`, which runs
+detached with retry-on-rate-limit and cleans up after itself.
+
+An unrecognised flag is rejected outright — a typo must never start an
+hours-long LLM job by falling through to the default.

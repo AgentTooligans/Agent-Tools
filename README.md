@@ -65,7 +65,24 @@ passive, and the instruction file is what an agent actually reads every session.
 | initial code graph | AST only — no LLM, no cost |
 
 Docs are deliberately **not** indexed by `init`, because that pass costs tokens.
-Run `agent-tools refresh` when you want them.
+`init` gets you a working graph in a minute; the semantic read is a deliberate
+second step.
+
+### The three tiers
+
+| command | scans | LLM? | time |
+|---|---|---|---|
+| `agent-tools init` | code only (AST) | no | ~1 min |
+| `agent-tools refresh` | code + **docs + images**, then names the communities | yes | minutes → hours |
+| `agent-tools refresh --deep` | same, plus aggressive inferred edges | yes | hours on a big corpus |
+
+`--deep` uses a **separate cache namespace**, so the first deep run re-reads
+every doc even if a standard pass already cached them. For a corpus large enough
+to run for hours, use `scripts/graphify-full-run.sh` instead — it detaches,
+retries on rate limits, and terminates itself.
+
+Only docs and images ever cost tokens; code is always AST. And it is
+incremental — after the first pass you pay only for docs you actually edited.
 
 ---
 

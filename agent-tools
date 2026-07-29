@@ -25,7 +25,7 @@
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=2.0.0
+VERSION=2.1.0
 
 BIN="$HOME/.local/bin"
 AM="$HOME/.agentmemory"
@@ -183,6 +183,13 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools refresh           refresh this project's graph, in the right order
   agent-tools help              the reasoning behind every default
 
+Flags (refresh):
+  --code-only     AST only, zero LLM, ~1 min
+  (default)       code + docs/images semantic pass + community naming
+  --deep          as default, but aggressive inferred-edge extraction.
+                  Separate cache namespace: the first deep run re-reads
+                  every doc. Hours on a large corpus.
+
 Flags (install-machine):
   -y, --yes       install everything missing without asking (CI / unattended)
       --no-install  never install; just report what is missing
@@ -211,6 +218,21 @@ PLATFORMS
            upstream ships no PowerShell/scoop/winget installer for its engine,
            and `agentmemory connect` is unsupported on native Windows. Use WSL2.
            Exception: `agentmemory connect copilot-cli` is Windows-safe.
+
+THE THREE TIERS
+
+  agent-tools init             code only (AST). Free, ~1 min. What a new
+                               project gets, so setup never turns into a
+                               surprise multi-hour LLM job.
+  agent-tools refresh          code + docs + images, then community naming.
+                               Incremental: you pay only for docs you edited.
+  agent-tools refresh --deep   same, with aggressive inferred-edge extraction.
+                               Its cache is a separate namespace, so the first
+                               deep run re-reads every doc regardless of what a
+                               standard pass already cached.
+  scripts/graphify-full-run.sh deep, detached, with retry-on-rate-limit and
+                               self-termination. Use this instead of --deep
+                               when the corpus is big enough to run for hours.
 
 WHY EACH DEFAULT EXISTS  (all observed 2026-07-28)
 
@@ -782,11 +804,34 @@ refresh() {
         c_bad "another graphify run is active — wait and retry"; exit 1
     fi
     local mode="${1:-full}"
+    # Validate BEFORE doing anything. An unrecognised flag used to fall through
+    # to the default case and silently start a full semantic pass — an expensive
+    # LLM run triggered by a typo. Fail fast instead.
+    case "$mode" in
+        full|--code-only|--deep) ;;
+        *) c_bad "unknown option for refresh: $mode"
+           echo "  valid: (none) | --code-only | --deep"
+           exit 2 ;;
+    esac
     hdr "Before"; echo "  $(graph_stats)"
 
     hdr "1/3 structure"     # LAW: structure first, always
-    if [ "$mode" = "--code-only" ]; then graphify update . || exit 1
-    else graphify extract . --backend claude-cli || exit 1; fi
+    case "$mode" in
+      --code-only)
+        graphify update . || exit 1 ;;
+      --deep)
+        # Deep mode uses its OWN cache namespace (cache/semantic-deep/), so the
+        # first deep run re-dispatches every doc even if a standard pass already
+        # cached them. That is the cost driver, not the repo size.
+        local ndocs; ndocs="$(find . -name '*.md' -not -path './.git/*' -not -path './graphify-out/*' 2>/dev/null | wc -l | tr -d ' ')"
+        c_warn "deep mode: aggressive inferred-edge extraction over docs/images."
+        c_warn "Its cache namespace starts EMPTY, so the first run re-reads everything."
+        c_warn "~$ndocs markdown files here. On a large corpus this runs for hours —"
+        c_warn "for that, use scripts/graphify-full-run.sh (detached, retries, resumes)."
+        graphify extract . --backend claude-cli --mode deep || exit 1 ;;
+      *)
+        graphify extract . --backend claude-cli || exit 1 ;;
+    esac
     c_ok "$(graph_stats)"
 
     hdr "2/3 labels"        # LAW: `label`, never `cluster-only`; and always LAST
