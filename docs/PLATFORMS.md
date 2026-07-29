@@ -73,6 +73,52 @@ names the offender and the fix:
   — 'sudo apt-get install -y nodejs npm' inside WSL
 ```
 
+### Node version — the trap on Ubuntu 24.04
+
+**agentmemory declares `engines: node >=20`, and npm only WARNS about that.** So
+on Ubuntu 24.04 — whose `apt` Node is **18.19** — it installs happily and then
+crash-loops forever:
+
+```
+SyntaxError: The requested module 'node:util'
+does not provide an export named 'styleText'
+```
+
+(`styleText` arrived in Node 20.12.) The systemd unit restarts it, so you get a
+service that is permanently "active" and never answers on :3111.
+
+`agent-tools` now refuses to install agentmemory on Node < 20, and offers a
+NodeSource upgrade instead. Verified end to end on a pristine Ubuntu 24.04 WSL2
+distro: 18.19 → 22.23.1 → agentmemory installed → service healthy on :3111.
+
+### Line endings — CRLF is fatal
+
+Cloning this repo on Windows with git's default `core.autocrlf=true` rewrites
+the script to CRLF, and then it cannot start at all:
+
+```
+/usr/bin/env: 'bash\r': No such file or directory
+```
+
+Two defenses, both in place:
+
+- `.gitattributes` pins `eol=lf`, so git checkouts stay LF on every platform.
+- `install.sh` strips CR while installing, covering delivery by zip, email or
+  copy-paste, where `.gitattributes` cannot help. It says so when it does.
+
+### Path quirks — all verified passing
+
+`init` was run in each of these on real WSL2, on both filesystems:
+
+| path contains | `/mnt/c` | native Linux |
+|---|---|---|
+| spaces (`My Test Folder`) | ✅ | ✅ |
+| unicode (`tëst-プロジェクト`) | ✅ | ✅ |
+| parentheses and `&` | ✅ | ✅ |
+| `#` and `$` | ✅ | ✅ |
+| apostrophes (`o'brien's stuff`) | ✅ | ✅ |
+| deep nesting (11 levels) | ✅ | ✅ |
+
 ### Windows folders (`/mnt/c/...`) vs native Linux folders
 
 **Both work.** Verified on real WSL2 by running `init` in each and committing:

@@ -9,14 +9,19 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${1:-$HOME/.local/bin}"
 
 mkdir -p "$DEST" || { echo "cannot create $DEST"; exit 1; }
-install -m 0755 "$SRC/agent-tools" "$DEST/agent-tools" 2>/dev/null \
-  || { cp "$SRC/agent-tools" "$DEST/agent-tools" && chmod 755 "$DEST/agent-tools"; }
+# Strip CR on the way in. .gitattributes handles git clones, but a file that
+# arrived by zip, email or copy-paste from Windows can still carry CRLF, and a
+# CRLF shebang fails with: /usr/bin/env: 'bash\r': No such file or directory
+tr -d '\r' < "$SRC/agent-tools" > "$DEST/agent-tools" && chmod 755 "$DEST/agent-tools"
 echo "installed: $DEST/agent-tools"
+if grep -q $'\r' "$SRC/agent-tools" 2>/dev/null; then
+    echo "  note: source had Windows (CRLF) line endings — stripped during install"
+fi
 
 # The helper scripts are optional; only useful for large doc corpora.
 for f in graphify-full-run.sh graphify-run-status; do
     [ -f "$SRC/scripts/$f" ] || continue
-    cp "$SRC/scripts/$f" "$DEST/$f" && chmod 755 "$DEST/$f" && echo "installed: $DEST/$f"
+    tr -d '\r' < "$SRC/scripts/$f" > "$DEST/$f" && chmod 755 "$DEST/$f" && echo "installed: $DEST/$f"
 done
 
 case ":$PATH:" in

@@ -265,7 +265,27 @@ as_root() {
     return 126                                   # 126 = needs password, no tty
 }
 
+# agentmemory declares engines: node >=20. npm only WARNS about that, so it
+# installs happily on Node 18 and then crash-loops with "does not provide an
+# export named 'styleText'" (node:util gained styleText in 20.12). Ubuntu 24.04
+# — the most common WSL LTS — ships Node 18.19, so this is not a corner case.
+# Observed on a pristine Ubuntu 24.04 WSL2 distro 2026-07-29.
+NODE_MIN=20
+node_major() { node -v 2>/dev/null | sed 's/^v//; s/[.].*//'; }
+node_ok() { have_native node && [ "$(node_major)" -ge "$NODE_MIN" ] 2>/dev/null; }
+
+# Distro packages are often too old; NodeSource is the usual remedy on
+# Debian/Ubuntu. Behind confirm() because it adds a third-party apt repo.
+install_node_modern() {
+    have apt-get || return 1
+    have curl || return 1
+    curl -fsSL https://deb.nodesource.com/setup_22.x 2>/dev/null | as_root bash - >/dev/null 2>&1 || return 1
+    as_root apt-get install -y nodejs >/dev/null 2>&1
+    node_ok
+}
+
 install_node() {
+    node_ok && return 0
     have_native node && return 0
     case "$PLATFORM" in
         macos) have brew && brew install node ;;
@@ -431,7 +451,8 @@ doctor() {
     echo "  service: $(svc_describe)"
 
     hdr "Machine"
-    if have_native node; then c_ok "node $(node -v)"
+    if node_ok; then c_ok "node $(node -v)"
+    elif have_native node; then c_bad "node $(node -v) too old — agentmemory needs >= $NODE_MIN (crash-loops on 18)"
     elif have node; then c_bad "node is the WINDOWS one ($(where_is node)) — install Node inside WSL"
     else c_bad "node missing — run: agent-tools install-machine"; fi
     have uv   && c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')" || c_bad "uv missing"
@@ -490,7 +511,12 @@ install_machine() {
     if [ "$PLATFORM" = macos ] && ! have brew; then c_bad "install Homebrew first: https://brew.sh"; exit 1; fi
 
     hdr "1. Prerequisites"
-    if have_native node; then c_ok "node $(node -v)"
+    if node_ok; then c_ok "node $(node -v)"
+    elif have_native node; then
+        c_bad "node $(node -v) is too old — agentmemory needs >= $NODE_MIN"
+        if confirm "a modern Node from NodeSource (adds their apt repo)"; then
+            install_node_modern && c_ok "node $(node -v)" || c_warn "NodeSource failed — use nvm or fnm"
+        fi
     elif confirm "Node.js (required for agentmemory; graphify works without it)"; then
         install_node && c_ok "node $(node -v)" || c_warn "node install did not succeed"
     fi
@@ -523,6 +549,13 @@ install_machine() {
         c_warn "prefix, and the Linux service would fail while looking fine."
         c_warn "Install Node INSIDE WSL first, then re-run:"
         c_warn "    sudo apt-get install -y nodejs npm"
+        return
+    fi
+    if have_native node && ! node_ok; then
+        hdr "3. agentmemory — SKIPPED"
+        c_bad "node $(node -v) < $NODE_MIN — installing here yields a crash-looping service."
+        c_warn "Get Node >= $NODE_MIN, then re-run:"
+        c_warn "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs"
         return
     fi
     if ! have_native npm; then

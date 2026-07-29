@@ -1,0 +1,9 @@
+# Shell scripts MUST stay LF. Git's Windows default (core.autocrlf=true) rewrites
+# them to CRLF on checkout, and then the shebang itself breaks:
+#     /usr/bin/env: 'bash\r': No such file or directory
+# Verified on WSL2 2026-07-29 — a CRLF copy would not start at all.
+* text=auto eol=lf
+agent-tools text eol=lf
+install.sh  text eol=lf
+*.sh        text eol=lf
+*.md        text eol=lf
