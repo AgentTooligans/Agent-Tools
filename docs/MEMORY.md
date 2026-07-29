@@ -16,7 +16,7 @@ two hook sets into two stores.
 | service | worker on :37701, `npx claude-mem start`; no launchd/systemd unit | supervised server on :3111 (launchd/systemd) |
 | context injection | **automatic**, from your second session in a project | opt-in (`AGENTMEMORY_INJECT_CONTEXT`, off — costs tokens) |
 | ingest past sessions | no bulk importer; ships `/learn-codebase` for a repo | `import-jsonl` over `~/.claude/projects` |
-| export to Markdown | none | yes |
+| export to Markdown | yes (`agent-tools memory export`, reads its SQLite read-only) | yes |
 | write API | none — only its own hooks write | `POST /agentmemory/remember` |
 | MCP surface | registers its own | 53 tools by default; **8 with `--tools core`** |
 | multi-agent | claude-code, codex, cursor, copilot, gemini, windsurf, warp, opencode, openclaw, antigravity | similar list via `agentmemory connect` |
@@ -29,9 +29,14 @@ roughly the same set of hosts.
 **claude-mem** if you want it to just work: no supervised service, no working-
 directory trap, and context appears automatically at session start.
 
-**agentmemory** if you need to *rebuild history* (it is the only one with a bulk
-transcript importer) or to **export memories as text**, and you do not mind
-running a supervised server whose working directory decides where data lands.
+**agentmemory** if you want a supervised server with a documented write API
+(`POST /agentmemory/remember`) that anything can post to, and you do not mind
+that its working directory decides where the data lands.
+
+Neither export nor history-rebuilding separates them any more: `agent-tools`
+ships a Markdown exporter and a transcript importer for both. What still differs
+is the *write path* — agentmemory takes writes from any client, while claude-mem
+only writes through its own hooks.
 
 ---
 

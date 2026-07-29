@@ -176,7 +176,7 @@ overhead.
 | store | `~/.claude-mem/` (SQLite + Chroma) | follows the server's **working directory** |
 | context injection | **automatic at session start** | opt-in (costs tokens) |
 | bulk import of past sessions | none — starts from install day | `import-jsonl` |
-| export to Markdown | none | yes (`agent-tools memory export`) |
+| export to Markdown | yes (`agent-tools memory export`) | yes (`agent-tools memory export`) |
 
 ```bash
 agent-tools install-machine --memory=claude-mem    # default

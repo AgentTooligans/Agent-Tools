@@ -1300,15 +1300,19 @@ obsidian_export() {
     fi
 
     if [ "$mode" != "--graph-only" ]; then
-        if [ "$MEMORY_BACKEND" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
+        # A vault with only the graph is half a second brain: structure without
+        # the reasoning behind it. Both backends export, so neither leaves the
+        # vault one-sided.
+        if [ "$MEMORY_BACKEND" = claude-mem ]; then
+            # Reads ~/.claude-mem/claude-mem.db read-only; the worker need not
+            # be running, and an export can never mutate the live store.
+            memory_export "$vault/memories" >/dev/null 2>&1 \
+              && { c_ok "memories -> $vault/memories ($(find "$vault/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"; did_mem=1; } \
+              || c_warn "claude-mem export failed (no store at ~/.claude-mem yet?)"
+        elif [ "$MEMORY_BACKEND" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
             memory_export "$vault/memories" >/dev/null 2>&1 \
               && { c_ok "memories -> $vault/memories ($(find "$vault/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"; did_mem=1; } \
               || c_warn "memory export failed"
-        elif [ "$MEMORY_BACKEND" = claude-mem ]; then
-            # claude-mem keeps SQLite + Chroma and exposes no export API, so
-            # there is nothing to convert. Say so rather than failing quietly.
-            c_warn "claude-mem has no export API — memories cannot be exported to Markdown."
-            c_warn "Its store is SQLite at ~/.claude-mem. Only agentmemory can export today."
         else
             c_warn "memory backend not reachable — skipping memories"
         fi
@@ -1345,14 +1349,28 @@ obsidian_export() {
 # ---------------------------------------------------------------------------
 memory_dir_default() { printf '%s' "$(pwd)/memory-export-$(date +%Y%m%d)"; }
 
+# Export whichever backend is active. Both produce Markdown with YAML front
+# matter and [[wiki-links]], so a vault looks the same either way -- the point
+# of a "second brain" is one place holding BOTH the graph (structure) and the
+# memories (reasoning). claude-mem ships no export command, so we read its
+# SQLite directly, read-only.
 memory_export() {
     local out="${1:-$(memory_dir_default)}"
     local here; here="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")"
-    local script="$here/memory-export.py"
-    [ -f "$script" ] || script="$(dirname "$0")/scripts/memory-export.py"
-    [ -f "$script" ] || { c_bad "memory-export.py not found next to agent-tools"; return 1; }
     [ -n "$PY" ] || { c_bad "no working python"; return 1; }
-    "$PY" "$script" --out "$out"
+
+    local name="memory-export.py"
+    [ "$MEMORY_BACKEND" = claude-mem ] && name="claude-mem-export.py"
+
+    local script="$here/$name"
+    [ -f "$script" ] || script="$(dirname "$0")/scripts/$name"
+    [ -f "$script" ] || { c_bad "$name not found next to agent-tools"; return 1; }
+
+    if [ "$MEMORY_BACKEND" = claude-mem ]; then
+        "$PY" "$script" "$out"          # positional outdir
+    else
+        "$PY" "$script" --out "$out"
+    fi
 }
 
 memory_stop_agentmemory() {
