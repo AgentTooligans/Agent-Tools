@@ -205,8 +205,18 @@ LLM cost**.
 graphify-out/*
 !graphify-out/cache/
 graphify-out/cache/*
+!graphify-out/cache/semantic/
 !graphify-out/cache/semantic-deep/
 ```
+
+**Negate BOTH namespaces.** `semantic/` (standard runs) and `semantic-deep/`
+(`--deep`) are separate directories, and a rule covering only one silently drops
+the other. Found in a live repo 2026-07-29: 296 `semantic-deep/` files tracked
+while **162 `semantic/` files sat ignored** — the standard-mode extraction was
+one `rm -rf` from gone while the deep-mode extraction was safe.
+
+`cache/ast/` is deliberately NOT committed: it is regenerated locally in seconds
+with no API cost.
 
 **Negation rules only make files addable — they do not add them.** A repo was
 found with exactly these rules, a comment explaining that the cache "IS
