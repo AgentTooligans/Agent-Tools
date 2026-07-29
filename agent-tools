@@ -25,7 +25,7 @@
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=2.2.0
+VERSION=3.0.0
 
 BIN="$HOME/.local/bin"
 AM="$HOME/.agentmemory"
@@ -66,6 +66,51 @@ export PATH="$BIN:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # ---------------------------------------------------------------------------
 ASSUME_YES=0
 NO_INSTALL=0
+
+# ---------------------------------------------------------------------------
+# Memory backend. Two tools do this job and they must not both be active:
+# each hooks the session lifecycle, so running both means double capture and
+# double per-tool-call overhead.
+#
+#   claude-mem   default. Self-spawns its worker (no supervised service, no
+#                cwd trap), injects context at session start, ~3.4x the
+#                adoption. No bulk importer — starts from install day.
+#   agentmemory  opt-in. Needs a supervised server whose WORKING DIRECTORY
+#                decides the store location, but has `import-jsonl` to rebuild
+#                from past transcripts.
+#
+# Resolution order: --memory flag > saved choice > default.
+# ---------------------------------------------------------------------------
+AT_CONFIG_DIR="$HOME/.config/agent-tools"
+AT_CONFIG="$AT_CONFIG_DIR/config"
+MEMORY_DEFAULT="claude-mem"
+MEMORY_BACKEND=""
+for _a in "$@"; do
+    case "$_a" in
+        --memory=*) MEMORY_BACKEND="${_a#--memory=}" ;;
+    esac
+done
+if [ -z "$MEMORY_BACKEND" ] && [ -f "$AT_CONFIG" ]; then
+    MEMORY_BACKEND="$(sed -n 's/^memory_backend=//p' "$AT_CONFIG" 2>/dev/null | tail -1)"
+fi
+MEMORY_BACKEND="${MEMORY_BACKEND:-$MEMORY_DEFAULT}"
+case "$MEMORY_BACKEND" in
+    claude-mem|agentmemory|none) ;;
+    *) printf '  unknown --memory value: %s (use claude-mem | agentmemory | none)\n' "$MEMORY_BACKEND"; exit 2 ;;
+esac
+remember_backend() {
+    mkdir -p "$AT_CONFIG_DIR" 2>/dev/null
+    if [ -f "$AT_CONFIG" ]; then
+        grep -v '^memory_backend=' "$AT_CONFIG" > "$AT_CONFIG.tmp" 2>/dev/null || true
+        mv "$AT_CONFIG.tmp" "$AT_CONFIG" 2>/dev/null
+    fi
+    printf 'memory_backend=%s\n' "$1" >> "$AT_CONFIG"
+}
+
+# Detect either backend regardless of which is selected, so we can warn when
+# both are present (the user asked for a loud warning, not a hard block).
+cm_installed() { have claude-mem || [ -d "$HOME/.claude-mem" ]; }
+am_installed() { have agentmemory || [ -d "$AM/data" ]; }
 for _a in "$@"; do
     case "$_a" in
         -y|--yes)     ASSUME_YES=1 ;;
@@ -221,6 +266,9 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools refresh           refresh this project's graph, in the right order
   agent-tools status            is a refresh running here? how far along?
   agent-tools stop              stop a run in THIS repo (other projects untouched)
+  agent-tools memory status     which backend, what is installed
+  agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
+  agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -231,6 +279,12 @@ Flags (refresh):
                   every doc. Hours on a large corpus.
   --detach        run in the background, surviving the terminal. Combines
                   with the others: `refresh --deep --detach`.
+
+Memory backend (install-machine):
+  --memory=claude-mem   default. self-spawning worker, context injection
+  --memory=agentmemory  supervised server, has a bulk transcript importer
+  --memory=none         graphify only
+  Your choice is remembered in ~/.config/agent-tools/config.
 
 Flags (install-machine):
   -y, --yes       install everything missing without asking (CI / unattended)
@@ -567,7 +621,24 @@ doctor() {
         fi
     fi
 
-    if [ "$PLATFORM" != windows ]; then
+    hdr "Memory backend: $MEMORY_BACKEND"
+    if cm_installed && am_installed; then
+        c_bad "BOTH claude-mem and agentmemory are installed."
+        c_bad "If both are capturing, every tool call fires two hook sets into"
+        c_bad "two stores — double overhead and duplicated memory."
+        c_warn "Keep one active. Remove the other:"
+        c_warn "    npx claude-mem uninstall"
+        c_warn "    claude plugin uninstall agentmemory@agentmemory"
+    fi
+    case "$MEMORY_BACKEND" in
+      claude-mem)
+        cm_installed && c_ok "claude-mem installed" || c_bad "claude-mem missing — run: agent-tools install-machine"
+        [ -d "$HOME/.claude-mem" ] && c_ok "store: ~/.claude-mem" || c_warn "no store yet at ~/.claude-mem"
+        c_ok "no supervised service needed (worker self-spawns)" ;;
+      none) c_warn "no memory backend selected (--memory=none)" ;;
+    esac
+
+    if [ "$MEMORY_BACKEND" = agentmemory ] && [ "$PLATFORM" != windows ]; then
         hdr "Memory server"
         if curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
             c_ok "responding on :3111"
@@ -576,6 +647,32 @@ doctor() {
         if [ -f "$AM/bin/iii" ] && have file && ! file "$AM/bin/iii" 2>/dev/null | grep -qE "Mach-O|ELF"; then
             c_bad "iii engine binary looks foreign — delete it, it re-downloads"
         fi
+    fi
+
+    hdr "Instruction file hygiene"
+    # An instruction file is read into context EVERY session, so its size is a
+    # permanent tax. Memory backends exist precisely so narrative does not have
+    # to live here. Advisory only — this never edits your file.
+    local ifile="" f
+    for f in CLAUDE.md AGENTS.md .cursorrules; do
+        [ -f "$(git rev-parse --show-toplevel 2>/dev/null)/$f" ] && { ifile="$(git rev-parse --show-toplevel)/$f"; break; }
+    done
+    if [ -z "$ifile" ]; then
+        c_warn "no CLAUDE.md / AGENTS.md in this project"
+    else
+        local lines bytes longest
+        lines="$(wc -l < "$ifile" | tr -d ' ')"
+        bytes="$(wc -c < "$ifile" | tr -d ' ')"
+        longest="$(awk '{print length}' "$ifile" 2>/dev/null | sort -rn | head -1)"
+        if [ "$bytes" -gt 10240 ] || [ "$lines" -gt 200 ]; then
+            c_bad "$(basename "$ifile"): $lines lines, $((bytes/1024)) KB — this is read EVERY session"
+            c_warn "Keep it to build/test/lint commands and hard constraints."
+            c_warn "Narrative, history and decisions belong in memory ($MEMORY_BACKEND),"
+            c_warn "long-form docs in docs/. Nothing here is edited automatically."
+        else
+            c_ok "$(basename "$ifile"): $lines lines, $((bytes/1024)) KB — lean"
+        fi
+        [ "${longest:-0}" -gt 2000 ] && c_warn "longest line is $longest chars — likely a pasted log or status dump"
     fi
 
     hdr "Project: $(basename "$(pwd)")"
@@ -637,6 +734,49 @@ install_machine() {
         uv tool install "graphifyy[gemini,mcp]" --with "mcp<2" --force >/dev/null 2>&1 \
             && c_ok "graphify installed" || c_bad "graphify install failed"
     fi
+
+    if [ "$MEMORY_BACKEND" = none ]; then
+        hdr "3. memory — SKIPPED (--memory=none)"
+        c_ok "graphify is set up; no memory backend requested"
+        return
+    fi
+
+    if [ "$MEMORY_BACKEND" = claude-mem ]; then
+        hdr "3. memory backend: claude-mem"
+        # Loud warning rather than a block: the user may deliberately keep the
+        # other installed but inactive. Two ACTIVE capturers is the problem.
+        if am_installed; then
+            c_bad "agentmemory is ALSO installed. Do not run both capturing at once:"
+            c_bad "  every tool call would fire two hook sets into two stores."
+            c_warn "Stop agentmemory's capture before using claude-mem:"
+            c_warn "    claude plugin uninstall agentmemory@agentmemory"
+            case "$PLATFORM" in
+              macos) c_warn "    launchctl bootout gui/\$(id -u)/$SERVICE_LABEL" ;;
+              linux|wsl) c_warn "    systemctl --user disable --now agentmemory" ;;
+            esac
+        fi
+        if cm_installed; then c_ok "claude-mem present"
+        elif ! have npm; then c_warn "npm missing — cannot install claude-mem"
+        elif confirm "claude-mem (memory that persists across sessions)"; then
+            npx -y claude-mem install >/dev/null 2>&1 \
+              && c_ok "claude-mem installed (it wires its own hooks + MCP)" \
+              || c_bad "claude-mem install failed — try: npx claude-mem install"
+        fi
+        remember_backend claude-mem
+        hdr "Next"
+        echo "  cd <your-project> && agent-tools init"
+        echo "  claude-mem has NO bulk importer; to replay past sessions see"
+        echo "  scripts/claude-mem-import-transcripts.sh (unverified — dry-run first)"
+        return
+    fi
+
+    # ---- agentmemory path ------------------------------------------------
+    if cm_installed; then
+        c_bad "claude-mem is ALSO installed. Two active capturers is the problem:"
+        c_bad "  every tool call fires two hook sets into two stores."
+        c_warn "Remove one before continuing:  npx claude-mem uninstall"
+    fi
+    remember_backend agentmemory
 
     # Two different reasons to skip, two different messages — sharing one text
     # printed "use WSL2" on a Linux box, which is nonsense.
@@ -812,11 +952,26 @@ The graph covers code structure, docs and concepts. It does NOT index
 string-level details (CSS variables, literals) — use grep for those.
 If the graph looks stale, run `agent-tools refresh`.
 
-## Memory (agentmemory)
+## Memory
 
-Past sessions are searchable. Use recall before re-deriving an earlier
-decision, and save durable decisions explicitly. Memory is for decisions and
-rationale; the graph is for what the code *is*.
+Past sessions are searchable through the memory backend. Recall before
+re-deriving an earlier decision, and save durable decisions explicitly.
+Memory is for decisions and rationale; the graph is for what the code *is*.
+
+## Keep this file lean
+
+This file is read into context on EVERY session, so its size is a permanent
+tax on every request. Keep it to things that do not fit anywhere else:
+
+- build / test / lint / run commands
+- hard constraints and invariants that must never be violated
+- pointers to where the real documentation lives
+
+Do NOT put here: session logs, changelogs, status updates, narrative history,
+lists of what was done and when, or anything that reads like a diary. Those
+belong in the memory backend (decisions, rationale) or in docs/ (long-form).
+If a section is growing over time rather than being edited, it belongs
+somewhere else.
 <!-- /agent-tools:managed -->
 INSTR
         c_ok "agent instructions added to $instr"
@@ -980,6 +1135,104 @@ refresh() {
 }
 
 # ---------------------------------------------------------------------------
+# Memory backend management.
+#
+# Switching is SYSTEM-WIDE, not per project: both backends hook the session
+# lifecycle at user scope and keep one machine-global store. A per-project
+# split would fragment your history and require both to stay installed and
+# hooked — the exact thing we warn against.
+#
+# The switch is ASYMMETRIC, and pretending otherwise would be dishonest:
+#   claude-mem -> agentmemory   memories can be POSTed to /agentmemory/remember
+#   agentmemory -> claude-mem   claude-mem has NO ingest API; only its own hooks
+#                               write. So we export to Markdown (portable, and
+#                               what an Obsidian vault wants) and point at the
+#                               transcript-replay script. Memories are NOT
+#                               silently recreated inside claude-mem.
+# ---------------------------------------------------------------------------
+memory_dir_default() { printf '%s' "$(pwd)/memory-export-$(date +%Y%m%d)"; }
+
+memory_export() {
+    local out="${1:-$(memory_dir_default)}"
+    local here; here="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")"
+    local script="$here/memory-export.py"
+    [ -f "$script" ] || script="$(dirname "$0")/scripts/memory-export.py"
+    [ -f "$script" ] || { c_bad "memory-export.py not found next to agent-tools"; return 1; }
+    [ -n "$PY" ] || { c_bad "no working python"; return 1; }
+    "$PY" "$script" --out "$out"
+}
+
+memory_stop_agentmemory() {
+    # Stop AND disable, so a backend nothing writes to is not left supervised.
+    # The STORE is never deleted — switching back must stay possible.
+    case "$PLATFORM" in
+        macos)
+            launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null
+            [ -f "$PLIST" ] && { mv "$PLIST" "$PLIST.disabled" 2>/dev/null && c_ok "launchd job disabled (plist kept as .disabled)"; } ;;
+        linux|wsl)
+            has_systemd && { systemctl --user disable --now agentmemory.service 2>/dev/null && c_ok "systemd unit disabled"; } ;;
+    esac
+    ( cd "$AM" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
+    if have claude && claude plugin list 2>/dev/null | grep -q "agentmemory@agentmemory"; then
+        claude plugin uninstall agentmemory@agentmemory >/dev/null 2>&1 \
+          && c_ok "agentmemory plugin removed (its hooks no longer fire)" \
+          || c_warn "could not remove the plugin — do it manually: claude plugin uninstall agentmemory@agentmemory"
+    fi
+    c_ok "agentmemory store preserved at $AM (nothing deleted)"
+}
+
+memory_switch() {
+    local target="${1:-}"
+    case "$target" in
+        claude-mem|agentmemory) ;;
+        *) c_bad "usage: agent-tools memory switch <claude-mem|agentmemory>"; return 2 ;;
+    esac
+    local current="$MEMORY_BACKEND"
+    [ "$current" = "$target" ] && { c_ok "already using $target"; return 0; }
+
+    hdr "Switching memory backend: $current -> $target"
+    c_warn "This is machine-wide. Memory spans projects, so it cannot be per-project."
+
+    # 1. Always export first — a portable record that outlives either tool.
+    if [ "$current" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
+        local out="$HOME/agentmemory-export-$(date +%Y%m%d)"
+        hdr "1/3 export current memories"
+        memory_export "$out" && c_ok "exported to $out"
+    else
+        hdr "1/3 export current memories"
+        c_warn "nothing to export (source backend not reachable)"
+    fi
+
+    # 2. Import where an API exists; be explicit where none does.
+    hdr "2/3 import into $target"
+    if [ "$target" = agentmemory ]; then
+        c_warn "claude-mem -> agentmemory: memories can be POSTed to /agentmemory/remember."
+        c_warn "Run this after agentmemory is up, against the exported notes."
+    else
+        c_bad "claude-mem has NO ingest API — memories cannot be injected."
+        c_warn "Your exported Markdown is the durable record. To rebuild memory"
+        c_warn "inside claude-mem, replay past sessions (costs tokens, unverified):"
+        c_warn "    scripts/claude-mem-import-transcripts.sh          # dry run"
+        c_warn "    scripts/claude-mem-import-transcripts.sh --limit 1 --go"
+    fi
+
+    # 3. Disable the outgoing backend, install the incoming one.
+    hdr "3/3 switch over"
+    if [ "$current" = agentmemory ]; then memory_stop_agentmemory; fi
+    if [ "$target" = claude-mem ]; then
+        if cm_installed; then c_ok "claude-mem already installed"
+        elif confirm "claude-mem"; then
+            npx -y claude-mem install >/dev/null 2>&1 \
+              && c_ok "claude-mem installed (wires its own hooks + MCP)" \
+              || c_bad "install failed — try: npx claude-mem install"
+        fi
+    fi
+    remember_backend "$target"
+    c_ok "backend is now: $target"
+    echo "  Restart Claude Code so hook changes take effect."
+}
+
+# ---------------------------------------------------------------------------
 # Is a run active in THIS repo, and what has it done so far?
 status_cmd() {
     local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
@@ -1025,6 +1278,15 @@ case "${1:-help}" in
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;
     status)            status_cmd ;;
+    memory)            shift
+                       case "${1:-status}" in
+                         export) shift; memory_export "${1:-}" ;;
+                         switch) shift; memory_switch "${1:-}" ;;
+                         status) echo "  backend: $MEMORY_BACKEND"
+                                 cm_installed && echo "  claude-mem : installed" || echo "  claude-mem : not installed"
+                                 am_installed && echo "  agentmemory: installed" || echo "  agentmemory: not installed" ;;
+                         *) echo "usage: agent-tools memory <status|export|switch>"; exit 2 ;;
+                       esac ;;
     stop)              stop_cmd ;;
     platform)          echo "$PLATFORM" ;;   # used by the self-test
     help|--help|-h)    usage; long_help ;;
