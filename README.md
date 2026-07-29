@@ -76,8 +76,10 @@ second step.
 | `agent-tools refresh` | code + **docs + images**, then names the communities | yes | minutes → hours |
 | `agent-tools refresh --deep` | same, plus aggressive inferred edges | yes | hours on a big corpus |
 
-`--deep` uses a **separate cache namespace**, so the first deep run re-reads
-every doc even if a standard pass already cached them. For a corpus large enough
+**Do not run a standard refresh "first" before `--deep`.** `--deep` already does
+everything `refresh` does, and it uses a **separate cache namespace** — so a
+standard pass beforehand doesn't warm it, and you pay for the doc extraction
+twice. If you want deep, go straight to deep. For a corpus large enough
 to run for hours, use `scripts/graphify-full-run.sh` instead — it detaches,
 retries on rate limits, and terminates itself.
 
@@ -130,6 +132,27 @@ that no longer exists.
 
 A refresh is **free when nothing changed**: unchanged files come from a
 content-keyed cache. You only pay for docs you actually edited.
+
+### Long runs
+
+```bash
+agent-tools refresh --deep --detach   # survives closing the terminal
+agent-tools status                    # running? how far along?
+agent-tools stop                      # stop THIS repo's run (others untouched)
+```
+
+When a detached run finishes it **exits by itself** — no daemon, nothing to
+kill. Its log stays at `.git/graphify-refresh.log`.
+
+Detach uses the best mechanism available: a `systemd-run --user` transient unit
+on Linux/WSL (self-cleaning), `caffeinate` + `nohup` on macOS so idle sleep
+can't pause a long run, and plain `nohup` elsewhere.
+
+**How long does a refresh take?** It depends entirely on **uncached docs**, not
+repo size — code is always free. Roughly 17 docs per LLM chunk and ~5 minutes
+per chunk on the serial `claude-cli` backend, so ~400 cold documents is ~2
+hours. A repo whose docs are already cached finishes in seconds. `status` shows
+chunk progress while it runs.
 
 To auto-refresh the code graph on every commit:
 

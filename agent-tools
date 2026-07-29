@@ -25,7 +25,7 @@
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=2.1.0
+VERSION=2.2.0
 
 BIN="$HOME/.local/bin"
 AM="$HOME/.agentmemory"
@@ -138,6 +138,44 @@ proc_running() {
     else ps -ef 2>/dev/null | grep -E "$1" | grep -qv grep; fi
 }
 
+# Is a graphify run active IN THIS REPO?
+#
+# The old check matched any graphify process anywhere on the machine, so
+# indexing project A blocked a refresh in unrelated project B — observed
+# 2026-07-29. Two writers on ONE graphify-out/ is the real hazard, so scope the
+# check by the process's working directory.
+#
+# If a pid's cwd cannot be determined we treat it as blocking: a false "wait"
+# costs you a minute, a false "go ahead" can corrupt a graph.
+# The bracket around the y is deliberate. `$(pgrep -f "$GRAPHIFY_PROCS")` forks
+# a subshell whose OWN command line contains this pattern text, so a literal
+# pattern matches that subshell — and its cwd is whatever repo you are checking,
+# producing a phantom "a run is active in this repo" (seen 2026-07-29).
+# "graphif[y]" still matches the string "graphify" as a regex, but the pattern
+# text itself does not, so the subshell is invisible to it.
+GRAPHIFY_PROCS="graphif[y] (extract|update|label|cluster-only|watch)"
+graphify_busy_here() {
+    local repo="$1" pid cwd
+    have pgrep || { proc_running "$GRAPHIFY_PROCS"; return $?; }
+    for pid in $(pgrep -f "$GRAPHIFY_PROCS" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "$PPID" ] && continue
+        cwd=""
+        if [ -r "/proc/$pid/cwd" ]; then
+            cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"
+        elif have lsof; then
+            cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        fi
+        if [ -z "$cwd" ]; then
+            BUSY_WHERE="(unknown cwd, pid $pid)"; return 0
+        fi
+        case "$cwd" in
+            "$repo"|"$repo"/*) BUSY_WHERE="$cwd (pid $pid)"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Pick a python that actually RUNS, not merely one that exists.
 #
 # On Windows, `python3` is usually the Microsoft Store "App Execution Alias" —
@@ -181,6 +219,8 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools install-machine   once per computer
   agent-tools init              once per project (run from inside the repo)
   agent-tools refresh           refresh this project's graph, in the right order
+  agent-tools status            is a refresh running here? how far along?
+  agent-tools stop              stop a run in THIS repo (other projects untouched)
   agent-tools help              the reasoning behind every default
 
 Flags (refresh):
@@ -189,6 +229,8 @@ Flags (refresh):
   --deep          as default, but aggressive inferred-edge extraction.
                   Separate cache namespace: the first deep run re-reads
                   every doc. Hours on a large corpus.
+  --detach        run in the background, surviving the terminal. Combines
+                  with the others: `refresh --deep --detach`.
 
 Flags (install-machine):
   -y, --yes       install everything missing without asking (CI / unattended)
@@ -480,6 +522,7 @@ import json
 try:
     d=json.load(open('graphify-out/graph.json'))
     print(f\"{len(d['nodes'])} nodes, {len(d['links'])} edges\")
+except FileNotFoundError: print('none yet — run: agent-tools init')
 except Exception: print('unreadable')" 2>/dev/null
 }
 
@@ -797,22 +840,105 @@ INSTR
 }
 
 # ---------------------------------------------------------------------------
+# Run a refresh in the background, surviving the terminal that launched it.
+# Mechanism per platform, best available first:
+#   Linux/WSL + systemd : systemd-run --user transient unit. Cleans itself up
+#                         when the command exits — nothing to unregister.
+#   macOS               : caffeinate (so idle sleep cannot pause a long run)
+#                         wrapped in nohup, detached from the shell.
+#   anything else       : plain nohup.
+# The detached child is invoked WITHOUT --detach, or it would detach forever.
+detach_refresh() {
+    local mode="$1" root="$2"
+    local log="$root/.git/graphify-refresh.log"
+    [ -d "$root/.git" ] || log="$root/graphify-refresh.log"
+    local self; self="$(command -v agent-tools || echo "$0")"
+
+    if graphify_busy_here "$root"; then
+        c_bad "a graphify run is already active in this repo: ${BUSY_WHERE:-?}"; return 1
+    fi
+
+    hdr "Detaching"
+    echo "  mode : ${mode/#full/full (code + docs + naming)}"
+    echo "  log  : $log"
+    : > "$log"
+
+    case "$PLATFORM" in
+      linux|wsl)
+        if has_systemd; then
+            local unit="graphify-refresh-$$"
+            systemd-run --user --unit="$unit" --working-directory="$root" \
+                --setenv=PATH="$PATH" \
+                bash -c "'$self' refresh $mode >> '$log' 2>&1" >/dev/null 2>&1 \
+              && { c_ok "started as systemd transient unit: $unit"
+                   _detach_help "journalctl --user -u $unit -f" "systemctl --user stop $unit" "$log"
+                   return 0; }
+            c_warn "systemd-run failed — falling back to nohup"
+        fi ;;
+      macos)
+        # caffeinate -i keeps the machine awake for the CHILD's lifetime only.
+        ( cd "$root" && nohup caffeinate -i -m "$self" refresh $mode >> "$log" 2>&1 & ) >/dev/null 2>&1
+        c_ok "started detached (caffeinate keeps the machine awake for it)"
+        _detach_help "tail -f '$log'" "agent-tools stop" "$log"
+        return 0 ;;
+    esac
+
+    ( cd "$root" && nohup "$self" refresh $mode >> "$log" 2>&1 & ) >/dev/null 2>&1
+    c_ok "started detached (nohup)"
+    _detach_help "tail -f '$log'" "agent-tools stop" "$log"
+    return 0
+}
+
+# Printed after every successful detach, so the three questions people actually
+# have — is it alive, how do I watch it, how do I stop it — are answered without
+# reading docs.
+_detach_help() {
+    local follow="$1" stop="$2" log="$3"
+    echo
+    echo "  is it running?   agent-tools status"
+    echo "  watch progress   $follow"
+    echo "  stop it early    $stop"
+    echo
+    echo "  When it finishes it EXITS on its own — there is no daemon to clean"
+    echo "  up and nothing to kill. The log stays at:"
+    echo "      $log"
+}
+
 refresh() {
     local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
     cd "$root" || exit 1
-    if proc_running "graphify (extract|update|label|cluster-only|watch)"; then
-        c_bad "another graphify run is active — wait and retry"; exit 1
+
+    # Flags may combine: `refresh --deep --detach`. Validate BEFORE doing
+    # anything — an unrecognised flag used to fall through to the default case
+    # and silently start a full semantic pass, i.e. a typo could kick off an
+    # hours-long LLM run.
+    local mode=full detach=0 a
+    for a in "$@"; do
+        case "$a" in
+            --code-only) mode="--code-only" ;;
+            --deep)      mode="--deep" ;;
+            --detach)    detach=1 ;;
+            full|"")     ;;
+            *) c_bad "unknown option for refresh: $a"
+               echo "  valid: (none) | --code-only | --deep | --detach"
+               exit 2 ;;
+        esac
+    done
+
+    # Guard AFTER validation, so a typo reports the typo — not "something else
+    # is running" — and scoped to this repo, so an unrelated project's run does
+    # not block you.
+    if graphify_busy_here "$root"; then
+        c_bad "a graphify run is already active in this repo: ${BUSY_WHERE:-?}"
+        echo "  wait for it, or stop it, then retry"
+        exit 1
     fi
-    local mode="${1:-full}"
-    # Validate BEFORE doing anything. An unrecognised flag used to fall through
-    # to the default case and silently start a full semantic pass — an expensive
-    # LLM run triggered by a typo. Fail fast instead.
-    case "$mode" in
-        full|--code-only|--deep) ;;
-        *) c_bad "unknown option for refresh: $mode"
-           echo "  valid: (none) | --code-only | --deep"
-           exit 2 ;;
-    esac
+
+    if [ "$detach" = 1 ]; then
+        detach_refresh "$mode" "$root"
+        return $?
+    fi
+
     hdr "Before"; echo "  $(graph_stats)"
 
     hdr "1/3 structure"     # LAW: structure first, always
@@ -840,16 +966,66 @@ refresh() {
 
     hdr "3/3 verify"
     graphify tree >/dev/null 2>&1 && c_ok "GRAPH_TREE.html written"
-    local n; n="$(graphify query "architecture overview" 2>/dev/null | grep -c '^NODE')"
-    [ "${n:-0}" -gt 0 ] && c_ok "query returns $n nodes — graph answers" || c_bad "query returned nothing"
+    local n total
+    n="$(graphify query "architecture overview" 2>/dev/null | grep -c '^NODE')"
+    total="$("$PY" -c "import json;print(len(json.load(open('graphify-out/graph.json'))['nodes']))" 2>/dev/null || echo 0)"
+    if [ "${n:-0}" -gt 0 ]; then
+        c_ok "query returns $n nodes — graph answers"
+    elif [ "${total:-0}" -lt 25 ]; then
+        # A handful of nodes is a real state for a tiny repo, not a failure.
+        c_warn "graph is very small ($total nodes) — nothing to match yet, which is fine"
+    else
+        c_bad "query returned nothing despite $total nodes — investigate"
+    fi
 }
 
 # ---------------------------------------------------------------------------
+# Is a run active in THIS repo, and what has it done so far?
+status_cmd() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
+    local log="$root/.git/graphify-refresh.log"; [ -f "$log" ] || log="$root/graphify-refresh.log"
+    hdr "Refresh status — $(basename "$root")"
+    if graphify_busy_here "$root"; then
+        local pid; pid="$(printf '%s' "${BUSY_WHERE:-}" | sed -n 's/.*pid \([0-9]*\).*/\1/p')"
+        local et; et="$(ps -o etime= -p "${pid:-0}" 2>/dev/null | tr -d ' ')"
+        c_ok "RUNNING${et:+ — $et elapsed}${pid:+ (pid $pid)}"
+        # Low CPU is normal: it blocks on the LLM, not the processor.
+        echo "  note: low CPU is expected — it waits on the model, it does not compute"
+    else
+        c_ok "no run active in this repo"
+    fi
+    echo "  graph : $(cd "$root" && graph_stats)"
+    if [ -f "$log" ]; then
+        echo "  log   : $log"
+        local chunks; chunks="$(grep -cE 'chunk [0-9]+/[0-9]+ done' "$log" 2>/dev/null)"
+        local total;  total="$(grep -oE 'chunk [0-9]+/[0-9]+ done' "$log" 2>/dev/null | tail -1 | sed 's|.*/||;s| done||')"
+        [ "${chunks:-0}" -gt 0 ] && echo "  chunks: ${chunks}${total:+/$total} done"
+        echo "  last  :"; tail -3 "$log" 2>/dev/null | sed 's/^/      /'
+    else
+        echo "  log   : none (no detached run has been started here)"
+    fi
+}
+
+# Stop a run in THIS repo only — never another project's.
+stop_cmd() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
+    if ! graphify_busy_here "$root"; then c_ok "nothing running in this repo"; return 0; fi
+    local pid; pid="$(printf '%s' "${BUSY_WHERE:-}" | sed -n 's/.*pid \([0-9]*\).*/\1/p')"
+    if [ -z "$pid" ]; then c_bad "could not identify the pid (${BUSY_WHERE:-?})"; return 1; fi
+    kill "$pid" 2>/dev/null; sleep 3
+    kill -0 "$pid" 2>/dev/null && { kill -9 "$pid" 2>/dev/null; sleep 1; }
+    if graphify_busy_here "$root"; then c_bad "still running — check manually"; return 1; fi
+    c_ok "stopped (pid $pid)"
+    echo "  Completed files stay cached, so re-running resumes rather than restarting."
+}
+
 case "${1:-help}" in
     doctor)            doctor ;;
     install-machine)   install_machine ;;
     init)              init_project ;;
-    refresh)           shift; refresh "${1:-full}" ;;
+    refresh)           shift; refresh "$@" ;;
+    status)            status_cmd ;;
+    stop)              stop_cmd ;;
     platform)          echo "$PLATFORM" ;;   # used by the self-test
     help|--help|-h)    usage; long_help ;;
     version|--version) echo "agent-tools $VERSION" ;;
