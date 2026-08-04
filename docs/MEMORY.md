@@ -4,6 +4,19 @@ Two tools do this job well. **Only one should be capturing at a time** — each
 hooks the session lifecycle, so two active backends means every tool call fires
 two hook sets into two stores.
 
+Two of the optional tools also store session data, and neither is a substitute:
+
+- **context-mode** does *session continuity* — surviving a compaction inside
+  one long session. It does not give you recall of a decision made three weeks
+  ago, and does not try to. Run it alongside a backend, not instead of one.
+- **token-savior** ships a genuine memory engine (SQLite WAL + FTS5 +
+  vectors). On a machine running `--memory=none` it can be your backend. On a
+  machine already running claude-mem or agentmemory it is a **second store
+  recording the same sessions** — leave that half unwired.
+
+`agent-tools doctor` warns when two capturers are **active**, not merely
+installed. See [TOOLS.md](TOOLS.md#memory--one-capturer-always).
+
 ---
 
 ## The comparison

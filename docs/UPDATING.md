@@ -1,15 +1,26 @@
 # Updating everything
 
-Five things update independently, each with its own footgun. There is one
+Everything here updates independently, each with its own footgun. There is one
 command that handles all of them:
 
 ```bash
-agent-tools update            # graphify + memory backend + caveman + self
+agent-tools update              # everything INSTALLED: graphify + memory
+                                # + every optional tool + agent-tools itself
+agent-tools update tools        # only the optional tools
 agent-tools update graphify
-agent-tools update memory     # whichever backend is active
+agent-tools update memory       # whichever backend is active
+agent-tools update rtk
 agent-tools update caveman
+agent-tools update superpowers
+agent-tools update context-mode
+agent-tools update crg          # code-review-graph (alias)
+agent-tools update ts           # token-savior (alias)
 agent-tools update self
 ```
+
+**`update` never installs something you don't have.** Anything missing is
+reported and skipped — an update command that quietly adds tools is not an
+update command. To add one, `agent-tools install <name>`.
 
 It finishes with a reminder to run `agent-tools doctor`, which is the real test
 that nothing came loose. The rest of this page is what each step does by hand,
@@ -25,6 +36,11 @@ and why it is not just "install latest".
 | claude-mem | `npx -y claude-mem@latest install` | **yes** — the worker |
 | agentmemory | `npm install -g @agentmemory/agentmemory@latest` | **yes** — the service |
 | caveman | `npx -y github:JuliusBrussee/caveman --force` | **yes** — your agent session |
+| rtk | `brew upgrade rtk` / re-run its `install.sh` / `cargo install --git … --force` | **yes** — hooks load at session start |
+| superpowers | `claude plugin update superpowers@claude-plugins-official` | **yes** |
+| context-mode | `claude plugin update context-mode@context-mode` | **yes** |
+| code-review-graph | `uv tool upgrade code-review-graph` | no — but rebuild the graph |
+| token-savior | `uv tool install "token-savior-recall[mcp,memory-vector]" --force` | no |
 | agent-tools | `git pull && ./install.sh` | no |
 
 ---
@@ -133,6 +149,99 @@ Full detail: [CAVEMAN.md](CAVEMAN.md).
 
 ---
 
+## rtk
+
+```bash
+agent-tools update rtk
+```
+
+By hand, whichever route installed it:
+
+```bash
+brew upgrade rtk                                          # macOS
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+cargo install --git https://github.com/rtk-ai/rtk --force  # Windows / from source
+```
+
+**Restart your agent afterwards** — the `PreToolUse` hook is read at session
+start, so a running session keeps calling the old binary path.
+
+The hook itself does not need reinstalling; it is a settings entry, not a
+generated file. If `rtk gain` stops working after an update, the `rtk` on your
+PATH is the crates.io "Rust Type Kit", not this one — see
+[TOOLS.md](TOOLS.md#rtk).
+
+---
+
+## superpowers and context-mode
+
+```bash
+agent-tools update superpowers
+agent-tools update context-mode
+```
+
+Both are Claude Code plugins, so both go through the same two steps — refresh
+the marketplace, then update the plugin:
+
+```bash
+claude plugin marketplace update
+claude plugin update superpowers@claude-plugins-official
+claude plugin update context-mode@context-mode
+```
+
+**Restart Claude Code.** Plugin manifests — and, for context-mode, six hooks —
+are read at session start.
+
+context-mode's data in `~/.claude/context-mode/` survives an update. If it
+starts failing after a Node upgrade *downwards*, check `node -v`: it needs
+**>= 22.5**, and below that its hooks fail at runtime rather than refusing to
+install.
+
+---
+
+## code-review-graph
+
+```bash
+agent-tools update crg
+```
+
+By hand:
+
+```bash
+uv tool upgrade code-review-graph
+```
+
+**Rebuild the graph in every repo where it is wired.** The SQLite index is
+keyed to the parser version, so a version bump can leave a graph the new binary
+disagrees with. It is free to redo — no LLM anywhere in the pipeline:
+
+```bash
+cd <repo> && code-review-graph build
+```
+
+---
+
+## token-savior
+
+```bash
+agent-tools update ts
+```
+
+By hand — and **note this is not `uv tool upgrade`**:
+
+```bash
+uv tool install "token-savior-recall[mcp,memory-vector]" --force
+```
+
+Extras are not remembered across an upgrade. Drop `[memory-vector]` and it
+still starts, prints *"vector search disabled"* to stderr, and silently falls
+back to keyword-only recall. Same class of bug as graphify's `[gemini,mcp]`,
+same fix: always name the extras.
+
+Its store in `~/.local/share/token-savior/` is untouched by an update.
+
+---
+
 ## agent-tools itself
 
 ```bash
@@ -177,10 +286,14 @@ an update is safe and is the easiest fix if a server stops loading.
 ```bash
 agent-tools version
 agent-tools doctor        # every component, plus what's wrong
+agent-tools tools         # the optional tools, and what overlaps
 graphify --version
 agentmemory --version
 npx claude-mem --version
 agent-tools caveman status
+rtk --version && rtk gain          # gain is the test that it's the RIGHT rtk
+code-review-graph --version
+claude plugin list                 # superpowers, context-mode, caveman
 ```
 
 ---

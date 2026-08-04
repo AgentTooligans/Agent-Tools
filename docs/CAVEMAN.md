@@ -5,13 +5,16 @@ MIT · installed by default, `--no-caveman` to skip.
 
 ## Why it is here
 
-The other two tools attack **input**: graphify answers "where does this live?"
-from a graph instead of ten file reads, and the memory backend keeps you from
-re-deriving a decision you already made. Neither changes what the agent *says
+Every other tool in the default set attacks something the agent **reads**:
+graphify answers "where does this live?" from a graph instead of ten file
+reads, the memory backend keeps you from re-deriving a decision you already
+made, rtk filters what shell commands return, and context-mode keeps a
+compaction from erasing the session. None of them changes what the agent *says
 back* — and on a long session, output is a large share of the spend, because
 every reply is re-read as context by the next turn.
 
-caveman is the third leg. It is a **skill**: instructions telling the agent to
+caveman owns that row alone. (Which row belongs to which tool:
+[TOOLS.md](TOOLS.md).) It is a **skill**: instructions telling the agent to
 drop filler, hedging and pleasantries while keeping technical substance exact
 and code verbatim. Upstream measures ~65% fewer output tokens. That is *their*
 number on their workload — we have not independently measured it, and neither
@@ -69,7 +72,7 @@ From `agent-tools`:
 
 ```bash
 agent-tools caveman status      # installed? active? at what level?
-agent-tools caveman install
+agent-tools install caveman        # (agent-tools caveman install still works)
 agent-tools caveman update
 agent-tools caveman uninstall
 ```

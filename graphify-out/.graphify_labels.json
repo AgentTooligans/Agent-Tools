@@ -1,8 +1,8 @@
 {
-  "0": "WSL2",
+  "0": "Platforms",
   "1": "2. graphify",
   "2": "agent-tools",
-  "3": "agent-tools",
+  "3": "agent-tools script",
   "4": "2026-07-29 — importer verification, caveman, unified update, graph rescue",
   "5": "graphify — when it earns its keep",
   "6": "Failure modes, in the order they bite",
@@ -18,7 +18,14 @@
   "16": "agent-tools.ps1",
   "17": "install.sh",
   "18": "graphify-run-status",
-  "19": "Other AI agents (including Codex)",
-  "20": "caveman — cutting output tokens",
-  "21": "adopt-session.sh"
+  "19": "README.md",
+  "20": "Everything outside the repo — the actual paths",
+  "21": "adopt-session.sh",
+  "22": "agent-tools",
+  "23": "The tools, and how to choose between them",
+  "24": "have",
+  "25": "c_ok",
+  "26": "c_bad",
+  "27": "install_context_mode",
+  "28": "install_crg"
 }

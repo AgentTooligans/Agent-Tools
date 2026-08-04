@@ -35,6 +35,14 @@ Nothing below is in any git repo. Sizes are from a real macOS install
 | `~/.agentmemory/` | 68 M | agentmemory store (if you use that backend). Exclude `bin/iii` — see below. |
 | `~/.claude/projects/` | 192 M | **every session transcript.** This is `claude --resume` history *and* the only source a bulk memory re-import could read. |
 | `~/.config/graphify/env` | small | API keys. **Prefer rotating over copying** — see Part 4. |
+| `~/.claude/context-mode/` | grows | **context-mode's sessions and indexed content** (SQLite FTS5). This is the "continue where I left off" data — nothing regenerates it. |
+| `~/.local/share/token-savior/` | grows | token-savior's `memory.db` and stats, if you opted in. |
+| `~/Library/Application Support/rtk/` (macOS)<br>`~/.config/rtk/` (Linux/WSL) | small | rtk's `history.db` — your **measured savings record** behind `rtk gain` — plus `filters.toml`. The config regenerates; the history doesn't. |
+| `~/.code-review-graph/` | small | its multi-repo registry, if you opted in. Per-repo indexes live in each repo and rebuild in seconds. |
+
+Every one of these is in `agent-tools migrate export`. Note the **space** in the
+macOS rtk path: hand-rolled `tar` lines that word-split a path list break on it
+(which is why `migrate export` feeds tar a newline-delimited `-T` file instead).
 
 Stop the worker before copying a live store, or you may copy a torn database:
 
@@ -50,6 +58,7 @@ npx claude-mem stop        # then copy ~/.claude-mem/
 | `~/.config/agent-tools/config` | which memory backend is active; reverts to the default. `init` rewrites it. |
 | `~/.claude/settings.json` | global Claude Code hooks/settings. |
 | `~/.claude/.caveman-active` | caveman level; a fresh install starts at `full`. |
+| the `PreToolUse`/`Bash` hook in `~/.claude/settings.json` | rtk stops filtering — it is installed but inert. `agent-tools install rtk` puts the entry back. |
 | `~/Library/LaunchAgents/com.agentmemory.server.plist` (macOS)<br>`~/.config/systemd/user/agentmemory.service` (Linux/WSL) | no supervised memory server. `install-machine` recreates it. |
 
 ### 🟢 Do NOT copy — reinstall instead
@@ -59,7 +68,7 @@ These are large, machine-specific, and rebuilt correctly by `install-machine`:
 | path | size | why not |
 |---|---|---|
 | `~/.local/share/uv/tools/graphifyy/` | 170 M | a venv with absolute paths and a platform-specific interpreter |
-| `~/.claude/plugins/` | 580 M | plugin caches; `caveman`/claude-mem reinstall themselves |
+| `~/.claude/plugins/` | 580 M | plugin caches; caveman, claude-mem, superpowers and context-mode all reinstall themselves. Their **data** is elsewhere and *is* copied — `~/.claude/context-mode/` above. |
 | `~/.local/bin/` | — | `install.sh` puts `agent-tools` and the helper scripts back |
 | `~/.agents/skills/` | 120 K | recreated by `agent-tools caveman install` |
 | `~/.claude/skills/` | — | symlinks into `~/.agents/skills` |
@@ -113,19 +122,45 @@ the smallest matter most and are the easiest to forget.
 
 ### The one-line version
 
-Copy `~/.claude-mem/`, `~/.claude/projects/`, `~/.claude.json`, and the small
+Don't hand-roll it — `agent-tools migrate export` resolves the whole list,
+including the `@`-imports and the tool state added since this page was first
+written:
+
+```bash
+agent-tools migrate export ~/agent-move.tgz    # old machine
+agent-tools migrate import ~/agent-move.tgz    # new machine
+agent-tools install-machine                    # binaries + plugins back
+agent-tools tools                              # confirm
+```
+
+If you want to know what that expands to: copy `~/.claude-mem/`,
+`~/.claude/projects/`, `~/.claude/context-mode/`, `~/.claude.json`,
+`~/.local/share/token-savior/`, rtk's config directory, and the small
 hand-written files in `~/.claude/` (`CLAUDE.md` + whatever it `@`-imports,
 `settings.json`, `plans/`). Reinstall everything else. Rotate the keys rather
 than copying them.
 
-A tar of just the irreplaceable parts, skipping the ~800 M of reinstallable
-caches:
+By hand, skipping the ~800 M of reinstallable caches — note the `-T` file
+rather than an argument list, because the macOS rtk path contains a space:
 
 ```bash
-tar czf agent-move.tgz \
-  -C "$HOME" .claude-mem .claude.json .config/graphify .config/agent-tools \
-  -C "$HOME/.claude" CLAUDE.md RTK.md settings.json plans projects
-# (add RTK.md's siblings if your CLAUDE.md @-imports more than one file)
+cat > /tmp/move.list <<'EOF'
+.claude-mem
+.claude.json
+.config/graphify
+.config/agent-tools
+.claude/CLAUDE.md
+.claude/RTK.md
+.claude/settings.json
+.claude/plans
+.claude/projects
+.claude/context-mode
+.local/share/token-savior
+Library/Application Support/rtk
+EOF
+( cd "$HOME" && tar czf ~/agent-move.tgz -T /tmp/move.list )
+# (add RTK.md's siblings if your CLAUDE.md @-imports more than one file;
+#  on Linux/WSL the rtk line is .config/rtk)
 ```
 
 ### The same paths on every platform
@@ -139,6 +174,7 @@ layout is identical on macOS, Linux and WSL. Only three things genuinely differ:
 | home | `/Users/<you>` | `/home/<you>` | `C:\Users\<you>` — write paths as `%USERPROFILE%\.claude` |
 | service manager | launchd:<br>`~/Library/LaunchAgents/com.agentmemory.server.plist` | systemd user unit:<br>`~/.config/systemd/user/agentmemory.service` | none — Task Scheduler; **agentmemory is unsupported natively, use WSL2** |
 | uv tool install | `~/.local/share/uv/tools/` | `~/.local/share/uv/tools/` | `%APPDATA%\uv\tools\` |
+| rtk config + savings history | `~/Library/Application Support/rtk/` — **contains a space** | `~/.config/rtk/` | `%APPDATA%\rtk\` |
 
 Everything else — `~/.claude/`, `~/.claude.json`, `~/.claude-mem/`,
 `~/.agentmemory/`, `~/.agents/skills/`, `~/.config/agent-tools/`,

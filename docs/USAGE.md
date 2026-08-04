@@ -10,6 +10,11 @@ the skill.
 | lives | `graphify-out/` in the project | one server, all projects |
 | cost | free for code; docs cost tokens once | free |
 
+Two opt-in tools — **code-review-graph** and **token-savior** — answer the same
+question as graphify with different trade-offs. Everything on this page about
+*when a graph earns its keep* applies to all three; which one to reach for is
+[TOOLS.md](TOOLS.md). Wire one per project, not three.
+
 ---
 
 ## graphify — when it earns its keep

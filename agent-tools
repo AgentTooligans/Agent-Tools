@@ -9,6 +9,9 @@
 #   agent-tools install-machine   one-time per COMPUTER
 #   agent-tools init              one-time per PROJECT (run inside the repo)
 #   agent-tools refresh           update this project's graph, in order
+#   agent-tools tools             every optional tool: installed? wired? where?
+#   agent-tools install NAME      add one tool (--project = this repo only)
+#   agent-tools update NAME|all   upgrade one tool, or everything installed
 #   agent-tools help              long help, with the reasoning
 #
 # PLATFORM SUPPORT
@@ -25,7 +28,7 @@
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=3.1.0
+VERSION=3.2.0
 
 BIN="$HOME/.local/bin"
 AM="$HOME/.agentmemory"
@@ -35,6 +38,14 @@ c_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
 c_warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 hdr()    { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 have()   { command -v "$1" >/dev/null 2>&1; }
+# Subcommand arguments and flags arrive in any order (`install rtk --project`
+# and `install --project rtk` are both things people type). Flags are already
+# parsed globally, so the subcommand only needs the first non-flag word.
+first_nonflag() {
+    local a
+    for a in "$@"; do case "$a" in --*|-y) ;; *) printf '%s' "$a"; return 0 ;; esac; done
+    return 0
+}
 
 # WSL inherits the WINDOWS PATH, so `node`/`npm` frequently resolve to
 # /mnt/c/Program Files/nodejs/... — Windows binaries running under Linux paths.
@@ -89,10 +100,29 @@ MEMORY_DEFAULT="claude-mem"
 MEMORY_BACKEND=""
 SKIP_CAVEMAN=0
 FORCE_IMPORT=0
+# ---------------------------------------------------------------------------
+# Optional tools that install-machine adds by default, and the flags to skip
+# each one. They are separate flags rather than one --no-extras because people
+# skip them for different reasons: rtk because they already have a Bash hook
+# they care about, context-mode because Node is old, superpowers because they
+# do not want more skills in context.
+# ---------------------------------------------------------------------------
+SKIP_RTK=0
+SKIP_SUPERPOWERS=0
+SKIP_CONTEXT_MODE=0
+# --project: install/activate for THIS REPO only, never machine-wide. Binaries
+# are still shared (a uv tool or a brew formula has no per-project form) --
+# what changes is where the ACTIVATION lands: repo .claude/settings.json,
+# project-scope plugins, `-s local` MCP entries.
+SCOPE_PROJECT=0
 for _a in "$@"; do
     case "$_a" in
         --memory=*) MEMORY_BACKEND="${_a#--memory=}" ;;
         --no-caveman) SKIP_CAVEMAN=1 ;;
+        --no-rtk) SKIP_RTK=1 ;;
+        --no-superpowers) SKIP_SUPERPOWERS=1 ;;
+        --no-context-mode) SKIP_CONTEXT_MODE=1 ;;
+        --project|--local) SCOPE_PROJECT=1 ;;
         --force) FORCE_IMPORT=1 ;;
     esac
 done
@@ -288,11 +318,35 @@ agent-tools — graphify + agentmemory, set up correctly, on any project.
   agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
   agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
   agent-tools obsidian DIR      export graph + memories into an Obsidian vault
+  agent-tools tools             every optional tool: installed? wired? overlapping?
+  agent-tools install NAME      install one tool (or: defaults | all)
+  agent-tools uninstall NAME    remove one tool
+  agent-tools wire NAME         add a tool's MCP to THIS project (crg|token-savior)
+  agent-tools unwire NAME       remove it from this project
   agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
-  agent-tools update [WHAT]     update all|graphify|memory|caveman|self
+  agent-tools update [WHAT]     update one thing, or everything installed
   agent-tools migrate export    archive what git cannot carry (memory, keys, ~/.claude)
   agent-tools migrate import F  restore that archive on a new computer
   agent-tools help              the reasoning behind every default
+
+Tools (agent-tools install <name>):
+  default (install-machine adds these):
+    rtk            filters Bash output before it reaches the model
+    superpowers    skills library (TDD, debugging, planning)
+    context-mode   sandboxes tool output, survives compaction (Node >= 22.5)
+    caveman        compresses what the agent SAYS BACK
+  opt-in (they duplicate graphify and each other — docs/TOOLS.md):
+    code-review-graph   second code graph, 30 MCP tools
+    token-savior        third code graph + its own memory engine
+
+  agent-tools update all        graphify + memory + every installed tool + self
+  agent-tools update tools      only the optional tools
+  agent-tools update graphify   just that one (same for rtk, caveman, ...)
+
+Scope:
+  --project       install/activate for THIS REPO only. Binaries are still
+                  shared (brew/uv/npm have no per-project form); what changes
+                  is where the hook, plugin and MCP entries land.
 
 Flags (refresh):
   --code-only     AST only, zero LLM, ~1 min
@@ -311,6 +365,9 @@ Memory backend (install-machine):
 
 Flags (install-machine):
   --no-caveman          skip the caveman output-compression skill
+  --no-rtk              skip rtk and its Bash hook
+  --no-superpowers      skip the superpowers skills library
+  --no-context-mode     skip context-mode (also skipped on Node < 22.5)
   -y, --yes       install everything missing without asking (CI / unattended)
       --no-install  never install; just report what is missing
   default         ask before each install; skips (never hangs) when
@@ -396,6 +453,48 @@ agentmemory
     footer; hand-edit them and the engine rejects the file.
   * Never run memory_heal on a freshly restored store — restored observations
     look exactly like the "orphaned" data it deletes.
+
+rtk  (observed 2026-08-04)
+  * There are TWO different tools called rtk. crates.io ships an unrelated
+    "Rust Type Kit" under the same binary name. `rtk --version` succeeds for
+    both, so it is not a test. `rtk gain` exists only on rtk-ai/rtk, which is
+    why doctor checks that instead. Homebrew core's `rtk` is the right one.
+  * `rtk init -g` PROMPTS ("Patch existing settings.json? [y/N]") and, with no
+    terminal attached, answers NO for you, prints a manual step and exits 0.
+    Driven from a script it reports success and installs nothing. It also has
+    no per-project form and appends an @RTK.md import to your GLOBAL
+    CLAUDE.md. So agent-tools writes the hook entry itself, idempotently, at
+    the scope you asked for, and can remove it again without disturbing other
+    hooks in the same file.
+
+context-mode
+  * Needs Node >= 22.5, one major above agentmemory's floor. On older Node it
+    installs fine and every hook then fails at RUNTIME, which reads as a broken
+    session rather than a version problem. install-machine checks first.
+  * Its session/content store is ~/.claude/context-mode -- that is the
+    "continue where I left off" data, and migrate export carries it.
+
+token-savior
+  * Extras are NOT remembered across an upgrade. [mcp] is the server,
+    [memory-vector] is sqlite-vec + fastembed. Without the second it starts,
+    says "vector search disabled" on stderr, and degrades to keyword-only
+    recall. Same shape as graphify's [gemini,mcp]: always re-specify.
+  * WORKSPACE_ROOTS unset means it auto-discovers every project under your
+    home directory -- ten on the machine this was written on, with duplicates.
+    `agent-tools wire token-savior` pins it to the repo you are in.
+  * `ts` collides with moreutils' `ts` timestamper. Use the full name.
+  * `ts init` adds TEN hook entries to the GLOBAL settings.json, one of them a
+    PreToolUse/Bash command REWRITER -- the same job rtk does. Two rewriters on
+    one command is a debugging problem, not a saving. `wire token-savior`
+    registers the MCP server only; doctor flags the pair if you ran it by hand.
+
+Overlap
+  * graphify, code-review-graph and token-savior answer the same question.
+    Wire ONE per project. An MCP server's tool schema is re-sent every session
+    whether or not you call it -- code-review-graph alone is 30 tools.
+  * caveman, rtk and context-mode do NOT overlap: they cut what the model
+    says, what commands return, and what survives a compaction. Run all three.
+  * Full comparison and pick-one guidance: docs/TOOLS.md
 
 MCP scope
   * Project scope (-s local), not user scope. A user-scope entry makes every
@@ -696,8 +795,15 @@ doctor() {
             && c_ok "global skills present (all agents)" \
             || c_warn "no global skills — non-Claude agents lack it: agent-tools caveman install"
     else
-        c_warn "caveman not installed — agent-tools caveman install"
+        c_warn "caveman not installed — agent-tools install caveman"
     fi
+
+    hdr "Optional tools"
+    local _t
+    for _t in rtk superpowers context-mode code-review-graph token-savior; do
+        tool_status_line "$_t"
+    done
+    tools_overlap_warnings
 
     if [ "$MEMORY_BACKEND" = agentmemory ] && [ "$PLATFORM" != windows ]; then
         hdr "Memory server"
@@ -890,6 +996,691 @@ caveman_cmd() {
     esac
 }
 
+# ===========================================================================
+# OPTIONAL TOOLS
+#
+# Five tools beyond graphify + memory + caveman. Three are installed by
+# default because they cost nothing per session beyond their own overhead and
+# help on every repo; two are OPT-IN because they duplicate graphify and each
+# other, and stacking three code-graph MCP servers loads three tool schemas
+# into every single session — the exact tax this project exists to avoid.
+#
+#   rtk            DEFAULT. Rust CLI proxy. A PreToolUse hook rewrites every
+#                  Bash call so `git status`, `cargo test`, `ls` etc. return
+#                  filtered output. Cuts INPUT tokens from command results.
+#   superpowers    DEFAULT. Skills library (TDD, debugging, planning). Costs
+#                  nothing until a skill is invoked.
+#   context-mode   DEFAULT. MCP server + hooks: sandboxes tool output, keeps
+#                  session state across compaction. Needs Node >= 22.5.
+#   code-review-graph  OPT-IN. Second code knowledge graph, 30 MCP tools.
+#   token-savior       OPT-IN. Third code graph + its own memory engine.
+#
+# WHY OPT-IN IS NOT A JUDGEMENT ON QUALITY
+#   graphify, code-review-graph and token-savior answer the same question --
+#   "what is in this codebase and what touches what" -- with different
+#   trade-offs. Running two is defensible if you have a reason. Running all
+#   three by default is not, because every MCP server's schema is re-sent
+#   every session whether or not you call it. docs/TOOLS.md has the
+#   side-by-side and the pick-one guidance.
+#
+# SCOPE
+#   Binaries are machine-wide by construction: brew, uv and npm have no
+#   per-project form. `--project` changes where the ACTIVATION lands so other
+#   repos are untouched:
+#     hook       <repo>/.claude/settings.json   instead of ~/.claude/...
+#     plugin     --scope project                instead of --scope user
+#     MCP        already `-s local` in both cases
+# ===========================================================================
+RTK_REPO="rtk-ai/rtk"
+# rtk uses the OS config directory, not XDG everywhere, so this differs per
+# platform. It holds filters.toml AND history.db -- the savings record behind
+# `rtk gain`, which is the one thing here that cannot be regenerated. Kept
+# HOME-relative because `migrate export` archives from $HOME.
+# NOTE the space in the macOS path: anything consuming this list must be
+# newline-delimited, never word-split.
+case "$PLATFORM" in
+    macos) RTK_CONF_REL="Library/Application Support/rtk" ;;
+    *)     RTK_CONF_REL=".config/rtk" ;;
+esac
+RTK_INSTALL_SH="https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh"
+SUPERPOWERS_MARKET="anthropics/claude-plugins-official"
+SUPERPOWERS_PLUGIN="superpowers@claude-plugins-official"
+CONTEXT_MODE_MARKET="mksglu/context-mode"
+CONTEXT_MODE_PLUGIN="context-mode@context-mode"
+# context-mode's bundle uses APIs added in Node 22.5. Installing it on Node 20
+# succeeds and then every hook fails at runtime, which looks like a broken
+# session rather than a version problem.
+CONTEXT_MODE_NODE_MIN=22
+CRG_PKG="code-review-graph"
+TS_PKG="token-savior-recall"
+# [mcp] is the server; [memory-vector] is sqlite-vec + fastembed. Without the
+# second one token-savior starts, says "vector search disabled" on stderr and
+# silently degrades to keyword-only recall.
+TS_EXTRAS="token-savior-recall[mcp,memory-vector]"
+
+OPTIONAL_TOOLS="rtk superpowers context-mode caveman code-review-graph token-savior"
+DEFAULT_TOOLS="rtk superpowers context-mode caveman"
+
+# Repo root, or empty when we are not in one.
+repo_root() { git rev-parse --show-toplevel 2>/dev/null; }
+
+# Which settings.json a hook should be written to, honouring --project.
+hook_settings_file() {
+    if [ "$SCOPE_PROJECT" = 1 ]; then
+        local r; r="$(repo_root)"
+        [ -n "$r" ] || return 1
+        printf '%s/.claude/settings.json' "$r"
+    else
+        printf '%s/settings.json' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    fi
+}
+plugin_scope() { [ "$SCOPE_PROJECT" = 1 ] && printf 'project' || printf 'user'; }
+
+# ---------------------------------------------------------------------------
+# Hook editing.
+#
+# WHY WE PATCH settings.json OURSELVES INSTEAD OF RUNNING `rtk init -g`
+#   `rtk init -g` PROMPTS ("Patch existing settings.json? [y/N]") and, when it
+#   cannot read a terminal, DEFAULTS TO NO and prints a manual step -- then
+#   exits 0. Verified 2026-08-04 on macOS: the command "succeeded", the hook
+#   was never installed, and only the printed text said so. Anything driving
+#   it from a script would report success and leave rtk inert.
+#   It also has no --project form, and it appends an `@RTK.md` import to your
+#   global CLAUDE.md, which is a machine-wide edit we should not make on
+#   someone's behalf when they asked for one repo.
+#   So: we add the same hook entry ourselves, idempotently, at the scope asked
+#   for, and we can remove it again.
+# ---------------------------------------------------------------------------
+hook_edit() {   # hook_edit add|remove <settings.json> <event> <matcher> <command>
+    local action="$1" file="$2" event="$3" matcher="$4" cmd="$5"
+    [ -n "$PY" ] || { c_bad "no working python — cannot edit $file"; return 1; }
+    mkdir -p "$(dirname "$file")" 2>/dev/null
+    ACTION="$action" FILE="$file" EVENT="$event" MATCHER="$matcher" CMD="$cmd" \
+    "$PY" - <<'PYEOF'
+import json, os, sys
+
+action, path = os.environ["ACTION"], os.environ["FILE"]
+event, matcher, cmd = os.environ["EVENT"], os.environ["MATCHER"], os.environ["CMD"]
+
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except FileNotFoundError:
+    data = {}
+except (json.JSONDecodeError, OSError) as exc:
+    # Never clobber a settings file we cannot parse -- that is someone's
+    # whole Claude Code configuration.
+    print(f"unreadable: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+if not isinstance(data, dict):
+    print("settings.json is not an object", file=sys.stderr)
+    raise SystemExit(2)
+
+hooks = data.setdefault("hooks", {})
+entries = hooks.setdefault(event, [])
+
+def has(entry):
+    return any(h.get("command") == cmd for h in entry.get("hooks", []))
+
+changed = False
+if action == "add":
+    if any(e.get("matcher") == matcher and has(e) for e in entries):
+        raise SystemExit(3)                      # 3 = already present
+    for e in entries:
+        if e.get("matcher") == matcher:
+            e.setdefault("hooks", []).append({"type": "command", "command": cmd})
+            changed = True
+            break
+    else:
+        entries.append({"matcher": matcher,
+                        "hooks": [{"type": "command", "command": cmd}]})
+        changed = True
+else:
+    for e in list(entries):
+        kept = [h for h in e.get("hooks", []) if h.get("command") != cmd]
+        if len(kept) != len(e.get("hooks", [])):
+            changed = True
+        # An entry whose only hook we just removed is dead weight; drop it.
+        # Entries that never had our hook are left exactly as they were.
+        if kept:
+            e["hooks"] = kept
+        else:
+            entries.remove(e)
+    if not entries:
+        hooks.pop(event, None)
+    if not hooks:
+        data.pop("hooks", None)
+
+if changed:
+    tmp = path + ".agent-tools.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+raise SystemExit(0)
+PYEOF
+}
+
+hook_present() {   # hook_present <settings.json> <command>
+    [ -f "$1" ] || return 1
+    [ -n "$PY" ] || return 1
+    FILE="$1" CMD="$2" "$PY" - <<'PYEOF' 2>/dev/null
+import json, os, sys
+try:
+    with open(os.environ["FILE"]) as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+cmd = os.environ["CMD"]
+for entries in (data.get("hooks") or {}).values():
+    for e in entries:
+        for h in e.get("hooks", []):
+            if h.get("command") == cmd:
+                raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# rtk — https://github.com/rtk-ai/rtk
+#
+# NAME COLLISION (the reason for the verify step)
+#   `rtk` on crates.io is a DIFFERENT project (Rust Type Kit). Both install a
+#   binary called rtk. `rtk --version` prints a version for either, so it is
+#   not a test. `rtk gain` only exists on this one, so that is the test --
+#   the same check upstream documents.
+#   Homebrew's core `rtk` formula IS this project (homepage rtk-ai.app,
+#   verified 2026-08-04), so brew is safe on macOS.
+# ---------------------------------------------------------------------------
+RTK_HOOK_CMD="rtk hook claude"
+
+rtk_installed() { have rtk; }
+rtk_is_right_one() { have rtk && rtk gain >/dev/null 2>&1; }
+# Where rtk keeps config + the savings history DB. Platform-specific because
+# it uses the OS config dir, not XDG everywhere.
+rtk_config_dir() { printf '%s/%s' "$HOME" "$RTK_CONF_REL"; }
+
+install_rtk() {
+    hdr "rtk (Bash output compression)"
+    if [ "$SKIP_RTK" = 1 ]; then c_warn "skipped (--no-rtk)"; return 0; fi
+
+    if rtk_installed; then
+        c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}') present"
+    elif ! confirm "rtk (filters Bash output before it reaches the model)"; then
+        return 0
+    else
+        case "$PLATFORM" in
+            macos)
+                if have brew; then
+                    brew install rtk >/dev/null 2>&1 && c_ok "rtk installed (brew)" \
+                        || c_bad "brew install rtk failed"
+                fi ;;
+            linux|wsl)
+                # Installs to ~/.local/bin, which we already put on PATH above.
+                if have curl; then
+                    curl -fsSL "$RTK_INSTALL_SH" | sh >/dev/null 2>&1 \
+                        && c_ok "rtk installed (upstream install.sh -> $BIN)" \
+                        || c_warn "install.sh failed"
+                else c_warn "curl missing — cannot fetch the installer"; fi ;;
+            windows)
+                # No install.sh path on native Windows. cargo builds from the
+                # right repo, which also sidesteps the crates.io name clash.
+                if have cargo; then
+                    cargo install --git "https://github.com/$RTK_REPO" >/dev/null 2>&1 \
+                        && c_ok "rtk installed (cargo, from $RTK_REPO)" \
+                        || c_bad "cargo install failed"
+                else
+                    c_warn "native Windows: download rtk-x86_64-pc-windows-msvc.zip from"
+                    c_warn "    https://github.com/$RTK_REPO/releases  and put rtk.exe on PATH"
+                    c_warn "    (or install Rust and re-run — cargo builds it from source)"
+                    return 0
+                fi ;;
+        esac
+        # Universal fallback for anything the cases above could not do.
+        if ! rtk_installed && have cargo; then
+            cargo install --git "https://github.com/$RTK_REPO" >/dev/null 2>&1 \
+                && c_ok "rtk installed (cargo fallback)"
+        fi
+        rtk_installed || { c_bad "rtk not installed"; return 1; }
+    fi
+
+    if ! rtk_is_right_one; then
+        c_bad "the rtk on PATH is NOT rtk-ai/rtk — \`rtk gain\` is not a command there"
+        c_bad "    found: $(where_is rtk)"
+        c_warn "    that is probably 'Rust Type Kit' from crates.io. Fix:"
+        c_warn "    cargo uninstall rtk && cargo install --git https://github.com/$RTK_REPO"
+        return 1
+    fi
+    c_ok "verified: \`rtk gain\` responds (this is rtk-ai/rtk, not the crates.io one)"
+    rtk_hook install
+}
+
+rtk_hook() {   # rtk_hook install|remove
+    local f; f="$(hook_settings_file)" || {
+        c_bad "--project needs a git repository"; return 1; }
+    case "$1" in
+      install)
+        if hook_present "$f" "$RTK_HOOK_CMD"; then
+            c_ok "hook already in $(printf '%s' "$f" | sed "s|^$HOME|~|")"
+        elif hook_edit add "$f" PreToolUse Bash "$RTK_HOOK_CMD"; then
+            c_ok "PreToolUse/Bash hook added to $(printf '%s' "$f" | sed "s|^$HOME|~|")"
+            echo "        restart Claude Code, then test with:  git status"
+        else
+            case $? in
+              3) c_ok "hook already present" ;;
+              *) c_bad "could not patch $f (left untouched)"; return 1 ;;
+            esac
+        fi ;;
+      remove)
+        hook_edit remove "$f" PreToolUse Bash "$RTK_HOOK_CMD" \
+            && c_ok "rtk hook removed from $(printf '%s' "$f" | sed "s|^$HOME|~|")" \
+            || c_warn "could not edit $f"
+        # Claude Code MERGES user and project settings. A project file can add
+        # a hook; it cannot cancel one declared at user scope -- there is no
+        # negation. So removing the project entry while a machine-wide entry
+        # exists changes nothing, and silently succeeding would teach someone
+        # that this repo is opted out when it is not.
+        if [ "$SCOPE_PROJECT" = 1 ] \
+           && hook_present "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" "$RTK_HOOK_CMD"; then
+            c_bad "rtk is STILL ACTIVE here: the hook is also in ~/.claude/settings.json,"
+            c_bad "and project settings merge with user settings — they cannot cancel them."
+            c_warn "To run rtk in some repos only, remove it machine-wide first:"
+            c_warn "    agent-tools uninstall rtk        # then: install rtk --project per repo"
+        fi ;;
+    esac
+}
+
+update_rtk() {
+    rtk_installed || { c_warn "rtk not installed — agent-tools install rtk"; return 0; }
+    case "$PLATFORM" in
+        macos) have brew && { brew upgrade rtk >/dev/null 2>&1; c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}')"; return 0; } ;;
+    esac
+    if have curl && [ "$PLATFORM" != windows ]; then
+        curl -fsSL "$RTK_INSTALL_SH" | sh >/dev/null 2>&1 \
+            && c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}')" \
+            || c_warn "rtk update failed"
+    elif have cargo; then
+        cargo install --git "https://github.com/$RTK_REPO" --force >/dev/null 2>&1 \
+            && c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}')" \
+            || c_warn "rtk update failed"
+    else c_warn "no updater available for rtk on this platform"; fi
+}
+
+uninstall_rtk() {
+    rtk_hook remove
+    if [ "$SCOPE_PROJECT" = 1 ]; then
+        c_ok "binary left installed (--project removes the hook only)"; return 0
+    fi
+    case "$PLATFORM" in
+        macos) have brew && brew uninstall rtk >/dev/null 2>&1 && c_ok "rtk removed (brew)" ;;
+        *) have cargo && cargo uninstall rtk >/dev/null 2>&1 && c_ok "rtk removed (cargo)" \
+             || { rm -f "$BIN/rtk" 2>/dev/null && c_ok "removed $BIN/rtk"; } ;;
+    esac
+    c_warn "config kept: $(rtk_config_dir) (history.db is your savings record)"
+}
+
+# ---------------------------------------------------------------------------
+# Claude Code plugins (superpowers, context-mode).
+#
+# Both are marketplace plugins, so one pair of helpers covers them. The
+# marketplace must be added before install or the plugin name does not
+# resolve; adding one that is already present is a no-op, so it is safe to
+# always do it.
+# ---------------------------------------------------------------------------
+plugin_installed() {   # plugin_installed <name@marketplace>
+    have claude || return 1
+    claude plugin list 2>/dev/null | grep -q "^  ❯ $1$" && return 0
+    claude plugin list 2>/dev/null | grep -qF "$1"
+}
+
+# Say something true when --project meets a plugin that is ALREADY installed
+# machine-wide. Installing it again at project scope changes nothing -- user
+# scope already covers every repo -- and silently doing nothing looks like the
+# flag was ignored.
+plugin_scope_note() {  # plugin_scope_note <name@marketplace>
+    [ "$SCOPE_PROJECT" = 1 ] || return 0
+    claude plugin list 2>/dev/null | grep -A2 -F "$1" | grep -qi 'Scope: user' || return 0
+    c_warn "already installed at USER scope, which covers this repo too."
+    c_warn "    --project changed nothing. To confine it, remove the user-scope"
+    c_warn "    copy first:  claude plugin uninstall $1"
+}
+
+plugin_add() {         # plugin_add <marketplace-repo> <name@marketplace> <label>
+    local market="$1" plugin="$2" label="$3"
+    have claude || { c_warn "claude CLI not found — cannot install $label"; return 1; }
+    claude plugin marketplace add "$market" >/dev/null 2>&1
+    if claude plugin install "$plugin" --scope "$(plugin_scope)" >/dev/null 2>&1; then
+        c_ok "$label installed (scope: $(plugin_scope))"
+    else
+        c_bad "$label install failed — try: claude plugin install $plugin"
+        return 1
+    fi
+}
+
+install_superpowers() {
+    hdr "superpowers (skills library)"
+    if [ "$SKIP_SUPERPOWERS" = 1 ]; then c_warn "skipped (--no-superpowers)"; return 0; fi
+    if plugin_installed "$SUPERPOWERS_PLUGIN"; then
+        c_ok "superpowers already installed"; plugin_scope_note "$SUPERPOWERS_PLUGIN"; return 0
+    fi
+    confirm "superpowers (TDD / debugging / planning skills; idle until invoked)" || return 0
+    plugin_add "$SUPERPOWERS_MARKET" "$SUPERPOWERS_PLUGIN" "superpowers"
+}
+
+install_context_mode() {
+    hdr "context-mode (tool-output sandbox + session continuity)"
+    if [ "$SKIP_CONTEXT_MODE" = 1 ]; then c_warn "skipped (--no-context-mode)"; return 0; fi
+    if ! have_native node || [ "$(node_major)" -lt "$CONTEXT_MODE_NODE_MIN" ] 2>/dev/null; then
+        local _nv; _nv="$(node -v 2>/dev/null)"; _nv="${_nv:-none}"
+        c_warn "needs Node >= $CONTEXT_MODE_NODE_MIN.5 (have $_nv) — skipping"
+        c_warn "its hooks fail at RUNTIME on older Node, which reads as a broken session"
+        return 0
+    fi
+    if plugin_installed "$CONTEXT_MODE_PLUGIN"; then
+        c_ok "context-mode already installed"; plugin_scope_note "$CONTEXT_MODE_PLUGIN"; return 0
+    fi
+    confirm "context-mode (MCP + hooks; adds a second PreToolUse/Bash hook next to rtk)" || return 0
+    plugin_add "$CONTEXT_MODE_MARKET" "$CONTEXT_MODE_PLUGIN" "context-mode"
+}
+
+update_plugin() {      # update_plugin <name@marketplace> <label>
+    have claude || { c_warn "claude CLI not found"; return 0; }
+    plugin_installed "$1" || { c_warn "$2 not installed"; return 0; }
+    claude plugin marketplace update >/dev/null 2>&1
+    claude plugin update "$1" >/dev/null 2>&1 \
+        && c_ok "$2 updated (restart Claude Code to apply)" \
+        || c_warn "$2 update failed — try: claude plugin update $1"
+}
+
+uninstall_plugin() {   # uninstall_plugin <name@marketplace> <label>
+    have claude || { c_warn "claude CLI not found"; return 0; }
+    claude plugin uninstall "$1" >/dev/null 2>&1 \
+        && c_ok "$2 uninstalled" || c_warn "$2 uninstall failed"
+}
+
+# ---------------------------------------------------------------------------
+# code-review-graph and token-savior — OPT-IN.
+#
+# Both are Python, both install through uv (already a hard requirement here),
+# so they are platform-agnostic in the same way graphify is. Both expose an
+# MCP server we wire at PROJECT scope only, for the same reason graphify is
+# project-scoped: a user-scope entry makes every `claude -p` subprocess boot
+# the server.
+#
+# Their INDEXES are per-repo and generated, so wiring also adds the ignore
+# rule -- committing a rebuildable SQLite graph is pure churn.
+# ---------------------------------------------------------------------------
+crg_installed() { have code-review-graph; }
+ts_installed()  { have token-savior; }
+
+install_crg() {
+    hdr "code-review-graph (second knowledge graph — opt-in)"
+    have uv || { c_bad "uv is required"; return 1; }
+    if crg_installed; then
+        c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}') present"
+    else
+        confirm "code-review-graph (30 MCP tools — read docs/TOOLS.md on overlap first)" || return 0
+        uv tool install "$CRG_PKG" >/dev/null 2>&1 \
+            && c_ok "code-review-graph installed" || { c_bad "install failed"; return 1; }
+    fi
+    c_warn "30 MCP tools is a large per-session schema. Wire it only where you"
+    c_warn "want it:  cd <repo> && agent-tools wire code-review-graph"
+    local r; r="$(repo_root)"
+    [ -n "$r" ] && confirm "wiring it into $(basename "$r") now" && wire_crg
+    return 0
+}
+
+wire_crg() {
+    local r; r="$(repo_root)" || { c_bad "not a git repository"; return 1; }
+    crg_installed || { c_bad "not installed — agent-tools install code-review-graph"; return 1; }
+    have claude || { c_bad "claude CLI not found"; return 1; }
+    if claude mcp list 2>/dev/null | grep -q "^code-review-graph"; then
+        c_ok "code-review-graph MCP already wired here"
+    else
+        claude mcp add code-review-graph -s local -- code-review-graph mcp --repo "$r" >/dev/null 2>&1 \
+            && c_ok "code-review-graph MCP wired (project scope, 30 tools)" \
+            || { c_bad "claude mcp add failed"; return 1; }
+    fi
+    grep -q '^\.code-review-graph/' "$r/.gitignore" 2>/dev/null || {
+        printf '\n# code-review-graph index (generated, rebuildable)\n.code-review-graph/\n' >> "$r/.gitignore"
+        c_ok "ignored .code-review-graph/"; }
+    hdr "Building its graph (local parse, no LLM)"
+    ( cd "$r" && code-review-graph build 2>&1 | tail -3 )
+}
+
+unwire_crg() {
+    have claude || return 1
+    claude mcp remove code-review-graph -s local >/dev/null 2>&1 \
+        && c_ok "code-review-graph MCP removed from this project" \
+        || c_warn "no code-review-graph MCP entry here"
+}
+
+install_ts() {
+    hdr "token-savior (third knowledge graph + its own memory — opt-in)"
+    have uv || { c_bad "uv is required"; return 1; }
+    if ts_installed; then
+        c_ok "token-savior present"
+    else
+        confirm "token-savior (overlaps BOTH graphify and your memory backend)" || return 0
+        uv tool install "$TS_EXTRAS" >/dev/null 2>&1 \
+            && c_ok "token-savior installed (with vector recall)" \
+            || { c_bad "install failed"; return 1; }
+    fi
+    # `ts` is a real collision: moreutils ships a `ts` timestamper, and both
+    # land in a PATH directory. Say so rather than letting someone wonder why
+    # `ts` prints timestamps.
+    if have ts && ! ts --help 2>&1 | grep -q 'find-dead-code'; then
+        c_warn "\`ts\` on PATH is NOT token-savior's ($(where_is ts)) — moreutils has one too."
+        c_warn "    use the full name: token-savior"
+    fi
+    c_warn "it also runs a memory engine. Running it alongside $MEMORY_BACKEND means"
+    c_warn "two stores of the same sessions — see docs/TOOLS.md before wiring."
+    local r; r="$(repo_root)"
+    [ -n "$r" ] && confirm "wiring it into $(basename "$r") now" && wire_ts
+    return 0
+}
+
+wire_ts() {
+    local r; r="$(repo_root)" || { c_bad "not a git repository"; return 1; }
+    ts_installed || { c_bad "not installed — agent-tools install token-savior"; return 1; }
+    have claude || { c_bad "claude CLI not found"; return 1; }
+    if claude mcp list 2>/dev/null | grep -q "^token-savior"; then
+        c_ok "token-savior MCP already wired here"; return 0
+    fi
+    # WORKSPACE_ROOTS pinned to this repo. Left unset it auto-discovers every
+    # project under your home directory -- observed finding 10 on this machine,
+    # including duplicates -- and indexes all of them.
+    claude mcp add token-savior -s local \
+        -e "WORKSPACE_ROOTS=$r" \
+        -e TOKEN_SAVIOR_CLIENT=claude-code \
+        -e TOKEN_SAVIOR_PROFILE=optimized \
+        -- token-savior >/dev/null 2>&1 \
+        && c_ok "token-savior MCP wired (project scope, pinned to this repo)" \
+        || { c_bad "claude mcp add failed"; return 1; }
+}
+
+unwire_ts() {
+    have claude || return 1
+    claude mcp remove token-savior -s local >/dev/null 2>&1 \
+        && c_ok "token-savior MCP removed from this project" \
+        || c_warn "no token-savior MCP entry here"
+}
+
+# ---------------------------------------------------------------------------
+# The optional-tool front end.
+# ---------------------------------------------------------------------------
+install_extras() {     # everything install-machine adds by default
+    install_caveman
+    install_rtk
+    install_superpowers
+    install_context_mode
+}
+
+tool_status_line() {   # tool_status_line <name>
+    case "$1" in
+      rtk)
+        if rtk_installed; then
+            if rtk_is_right_one; then
+                local hf; hf="$(hook_settings_file 2>/dev/null)"
+                if hook_present "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" "$RTK_HOOK_CMD"; then
+                    c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}') — hook active (machine-wide)"
+                elif [ -n "$hf" ] && hook_present "$hf" "$RTK_HOOK_CMD"; then
+                    c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}') — hook active (this repo)"
+                else
+                    c_warn "rtk installed but NO hook — it filters nothing: agent-tools install rtk"
+                fi
+            else
+                c_bad "rtk on PATH is the crates.io 'Rust Type Kit', not rtk-ai/rtk"
+            fi
+        else c_warn "rtk not installed"; fi ;;
+      superpowers)
+        plugin_installed "$SUPERPOWERS_PLUGIN" && c_ok "superpowers installed" \
+            || c_warn "superpowers not installed" ;;
+      context-mode)
+        if plugin_installed "$CONTEXT_MODE_PLUGIN"; then
+            c_ok "context-mode installed"
+            [ -d "$HOME/.claude/context-mode" ] && c_ok "  state: ~/.claude/context-mode"
+        else c_warn "context-mode not installed"; fi ;;
+      caveman)
+        if caveman_installed; then
+            local lvl; lvl="$(caveman_level)"
+            c_ok "caveman installed${lvl:+ — ACTIVE ($lvl)}"
+        else c_warn "caveman not installed"; fi ;;
+      code-review-graph)
+        if crg_installed; then
+            c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}') (opt-in)"
+            claude mcp list 2>/dev/null | grep -q "^code-review-graph" \
+                && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire code-review-graph)"
+        else c_warn "code-review-graph not installed (opt-in)"; fi ;;
+      token-savior)
+        if ts_installed; then
+            c_ok "token-savior installed (opt-in)"
+            claude mcp list 2>/dev/null | grep -q "^token-savior" \
+                && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire token-savior)"
+        else c_warn "token-savior not installed (opt-in)"; fi ;;
+    esac
+}
+
+tools_cmd() {
+    hdr "Default tools (installed by install-machine)"
+    local t
+    for t in $DEFAULT_TOOLS; do tool_status_line "$t"; done
+    hdr "Opt-in tools (agent-tools install <name>)"
+    for t in code-review-graph token-savior; do tool_status_line "$t"; done
+    tools_overlap_warnings
+    echo
+    echo "  install:   agent-tools install <name> [--project]"
+    echo "  update:    agent-tools update <name>       (or: update all)"
+    echo "  remove:    agent-tools uninstall <name> [--project]"
+    echo "  compare:   docs/TOOLS.md — what each one is best at"
+}
+
+# Overlaps are the whole reason two of these are opt-in, so say it where
+# someone can act on it rather than only in a document.
+tools_overlap_warnings() {
+    have claude || return 0
+    local mcps n=0
+    mcps="$(claude mcp list 2>/dev/null | awk '{print $1}')"
+    for m in graphify code-review-graph token-savior; do
+        printf '%s\n' "$mcps" | grep -q "^$m:\?$" && n=$((n+1))
+    done
+    if [ "$n" -gt 1 ]; then
+        hdr "Overlap in this project"
+        c_bad "$n code-graph MCP servers are wired here."
+        c_warn "Every one of them re-sends its tool schema EVERY session whether"
+        c_warn "or not you call it. Keep the one you actually query:"
+        c_warn "    agent-tools unwire code-review-graph | token-savior"
+    fi
+    if ts_installed && [ "$MEMORY_BACKEND" != none ] \
+       && claude mcp list 2>/dev/null | grep -q "^token-savior"; then
+        c_warn "token-savior's memory engine and $MEMORY_BACKEND both record sessions"
+    fi
+    if rtk_installed && plugin_installed "$CONTEXT_MODE_PLUGIN"; then
+        c_ok "rtk + context-mode both hook PreToolUse/Bash — they compose (rtk"
+        echo "        rewrites the command, context-mode routes the output)"
+    fi
+    # `ts init` installs token-savior's OWN Bash rewriter hook. That is not a
+    # composing layer like context-mode's -- it rewrites the command, which is
+    # exactly rtk's job, and two rewriters on one command is a debugging
+    # nightmare. `agent-tools wire token-savior` never calls `ts init`; this
+    # catches someone who ran it by hand.
+    local _gs="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    if rtk_installed && grep -q 'bash_rewriter_hook' "$_gs" 2>/dev/null \
+       && hook_present "$_gs" "$RTK_HOOK_CMD"; then
+        c_bad "TWO Bash rewriters are hooked: rtk and token-savior's bash_rewriter_hook."
+        c_warn "Keep one. token-savior's came from \`ts init\`; agent-tools wires only"
+        c_warn "its MCP server, which does not need that hook."
+    fi
+}
+
+resolve_tool() {       # normalise the aliases people actually type
+    case "$1" in
+        rtk) echo rtk ;;
+        superpowers|superpower) echo superpowers ;;
+        context-mode|contextmode|ctx) echo context-mode ;;
+        caveman) echo caveman ;;
+        code-review-graph|crg) echo code-review-graph ;;
+        token-savior|token-saviour|tokensavior|ts) echo token-savior ;;
+        *) return 1 ;;
+    esac
+}
+
+install_tool_cmd() {
+    local name="${1:-}"
+    [ -n "$name" ] || { c_bad "usage: agent-tools install <$(echo $OPTIONAL_TOOLS | tr ' ' '|')|defaults|all> [--project]"; return 2; }
+    if [ "$SCOPE_PROJECT" = 1 ] && [ -z "$(repo_root)" ]; then
+        c_bad "--project needs a git repository"; return 1
+    fi
+    case "$name" in
+      defaults) SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0
+                install_extras; return 0 ;;
+      all)      SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0
+                install_extras; install_crg; install_ts; return 0 ;;
+    esac
+    local t; t="$(resolve_tool "$name")" || { c_bad "unknown tool: $name"; return 2; }
+    case "$t" in
+        rtk)               SKIP_RTK=0; install_rtk ;;
+        superpowers)       SKIP_SUPERPOWERS=0; install_superpowers ;;
+        context-mode)      SKIP_CONTEXT_MODE=0; install_context_mode ;;
+        caveman)           SKIP_CAVEMAN=0; install_caveman ;;
+        code-review-graph) install_crg ;;
+        token-savior)      install_ts ;;
+    esac
+}
+
+uninstall_tool_cmd() {
+    local name="${1:-}"
+    local t; t="$(resolve_tool "$name")" || { c_bad "usage: agent-tools uninstall <$(echo $OPTIONAL_TOOLS | tr ' ' '|')>"; return 2; }
+    case "$t" in
+        rtk)          uninstall_rtk ;;
+        superpowers)  uninstall_plugin "$SUPERPOWERS_PLUGIN" superpowers ;;
+        context-mode) uninstall_plugin "$CONTEXT_MODE_PLUGIN" context-mode
+                      c_warn "state kept: ~/.claude/context-mode (delete it yourself if you mean it)" ;;
+        caveman)      caveman_cmd uninstall ;;
+        code-review-graph)
+                      unwire_crg
+                      [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$CRG_PKG" >/dev/null 2>&1 && c_ok "code-review-graph removed"; } ;;
+        token-savior)
+                      unwire_ts
+                      [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$TS_PKG" >/dev/null 2>&1 && c_ok "token-savior removed"; }
+                      c_warn "store kept: ~/.local/share/token-savior" ;;
+    esac
+}
+
+wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
+    local action="$1" name="${2:-}"
+    local t; t="$(resolve_tool "$name")" || {
+        c_bad "usage: agent-tools $action <code-review-graph|token-savior>"; return 2; }
+    case "$t:$action" in
+        code-review-graph:wire)   wire_crg ;;
+        code-review-graph:unwire) unwire_crg ;;
+        token-savior:wire)        wire_ts ;;
+        token-savior:unwire)      unwire_ts ;;
+        *) c_bad "$t has no per-project MCP entry — it is a $( [ "$t" = rtk ] && echo hook || echo plugin )"
+           c_warn "use: agent-tools install $t --project"; return 2 ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # Updating. Each component updates differently and some have footguns, so a
 # single command is safer than asking people to remember four incantations.
@@ -903,10 +1694,16 @@ caveman_cmd() {
 #   self        git pull + install.sh in the Agent-Tools checkout.
 # ---------------------------------------------------------------------------
 update_cmd() {
-    local what="${1:-all}"
-    case "$what" in all|graphify|memory|caveman|self) ;;
-        *) c_bad "usage: agent-tools update [all|graphify|memory|caveman|self]"; return 2 ;;
+    local what="${1:-}"; what="${what:-all}"
+    # Aliases first, so `update crg` and `update ts` behave like everywhere else.
+    case "$what" in
+        all|tools|graphify|memory|self) ;;
+        *) local _t; if _t="$(resolve_tool "$what")"; then what="$_t"
+           else c_bad "usage: agent-tools update [all|tools|graphify|memory|self|$(echo $OPTIONAL_TOOLS | tr ' ' '|')]"
+                return 2; fi ;;
     esac
+    # `all` never INSTALLS something you do not have — an update command that
+    # quietly adds tools is not an update command. Each branch below checks.
 
     if [ "$what" = all ] || [ "$what" = graphify ]; then
         hdr "graphify"
@@ -943,9 +1740,47 @@ update_cmd() {
         esac
     fi
 
-    if [ "$what" = all ] || [ "$what" = caveman ]; then
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = caveman ]; then
         caveman_installed && { hdr "caveman"; caveman_cmd update; } \
-            || { [ "$what" = caveman ] && c_warn "caveman not installed — agent-tools caveman install"; }
+            || { [ "$what" = caveman ] && c_warn "caveman not installed — agent-tools install caveman"; }
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = rtk ]; then
+        if rtk_installed; then hdr "rtk"; update_rtk
+        elif [ "$what" = rtk ]; then c_warn "rtk not installed — agent-tools install rtk"; fi
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = superpowers ]; then
+        if plugin_installed "$SUPERPOWERS_PLUGIN"; then hdr "superpowers"; update_plugin "$SUPERPOWERS_PLUGIN" superpowers
+        elif [ "$what" = superpowers ]; then c_warn "superpowers not installed — agent-tools install superpowers"; fi
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = context-mode ]; then
+        if plugin_installed "$CONTEXT_MODE_PLUGIN"; then hdr "context-mode"; update_plugin "$CONTEXT_MODE_PLUGIN" context-mode
+        elif [ "$what" = context-mode ]; then c_warn "context-mode not installed — agent-tools install context-mode"; fi
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = code-review-graph ]; then
+        if crg_installed; then
+            hdr "code-review-graph"
+            uv tool upgrade "$CRG_PKG" >/dev/null 2>&1 \
+                && c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}')" \
+                || c_warn "update failed"
+            # Its graph is keyed to the parser version, so a version bump can
+            # leave a graph the new binary disagrees with. Cheap to redo: no LLM.
+            [ -d "$(repo_root)/.code-review-graph" ] 2>/dev/null \
+                && c_warn "re-run 'code-review-graph build' in wired repos after a version bump"
+        elif [ "$what" = code-review-graph ]; then c_warn "not installed — agent-tools install code-review-graph"; fi
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = token-savior ]; then
+        if ts_installed; then
+            hdr "token-savior"
+            # upgrade drops extras that were declared at install time, so
+            # reinstall with them named or vector recall silently disappears.
+            uv tool install "$TS_EXTRAS" --force >/dev/null 2>&1 \
+                && c_ok "token-savior updated (extras re-specified)" || c_warn "update failed"
+        elif [ "$what" = token-savior ]; then c_warn "not installed — agent-tools install token-savior"; fi
     fi
 
     if [ "$what" = all ] || [ "$what" = self ]; then
@@ -988,7 +1823,12 @@ migrate_paths() {                      # prints HOME-relative paths that exist
     for p in .claude-mem .agentmemory .claude.json \
              .config/graphify .config/agent-tools \
              .claude/CLAUDE.md .claude/settings.json .claude/plans \
-             .claude/projects .claude/.caveman-active; do
+             .claude/projects .claude/.caveman-active \
+             .claude/context-mode \
+             .local/share/token-savior \
+             .code-review-graph \
+             "$RTK_CONF_REL"; do
+        [ -n "$p" ] || continue
         [ -e "$HOME/$p" ] && printf '%s\n' "$p"
     done
     # Files pulled in by `@import` lines at the top of the global CLAUDE.md.
@@ -1044,6 +1884,14 @@ migrate_cmd() {
         } > "$HOME/$man"
 
         printf '%s\n' "$list" | sed 's/^/  + /'
+        # A -T list file, not an argument list: rtk's macOS config lives in
+        # "Library/Application Support/rtk" and an unquoted $list word-splits
+        # that into three nonexistent paths. One name per line has no such
+        # failure mode. We stay in $HOME and never pass -C, so the names
+        # resolve against the directory we intend (mixing -C with -T resolved
+        # against the WRONG cwd on bsdtar -- that is why there is no -C here).
+        local flist=".agent-tools-filelist.txt"
+        { printf '%s\n' "$man"; printf '%s\n' "$list"; } > "$HOME/$flist"
         # Excludes: machine- and architecture-specific things that must NOT
         # travel. ~/.agentmemory/bin/iii is a 27 MB native binary (arm64 Mach-O
         # here) that is the WRONG ARCHITECTURE anywhere else -- it re-downloads.
@@ -1055,16 +1903,21 @@ migrate_cmd() {
             --exclude '*.pid' \
             --exclude 'engine-state.json' \
             --exclude '.DS_Store' \
-            "$man" $list ) 2>/dev/null \
-            || { c_bad "tar failed"; rm -f "$HOME/$man"; migrate_start_memory; return 1; }
-        rm -f "$HOME/$man"
+            -T "$flist" ) 2>/dev/null \
+            || { c_bad "tar failed"; rm -f "$HOME/$man" "$HOME/$flist"; migrate_start_memory; return 1; }
+        rm -f "$HOME/$man" "$HOME/$flist"
 
         migrate_start_memory
         c_ok "wrote $file ($(du -h "$file" 2>/dev/null | cut -f1))"
         echo
-        c_warn "NOT included (reinstall instead): plugins, uv tools, ~/.local/bin,"
-        c_warn "~/.agents/skills, shell-snapshots, session-env, caches."
-        c_warn "On the new machine:  agent-tools migrate import $(basename "$file")"
+        c_warn "NOT included (reinstall instead): plugin and uv-tool BINARIES,"
+        c_warn "~/.local/bin, ~/.agents/skills, shell-snapshots, session-env, caches."
+        c_warn "Their DATA is included: context-mode sessions, token-savior's store,"
+        c_warn "rtk's savings history, and every @import your global CLAUDE.md pulls in."
+        echo
+        c_warn "On the new machine:"
+        c_warn "    agent-tools migrate import $(basename "$file")"
+        c_warn "    agent-tools install-machine     # reinstalls the binaries + plugins"
         ;;
 
       import)
@@ -1091,8 +1944,9 @@ migrate_cmd() {
         migrate_start_memory
         [ "$rc" = 0 ] && c_ok "restore complete" || c_warn "tar reported conflicts; see the note above"
         echo
-        c_ok "next:  cd <project> && agent-tools init && agent-tools refresh --code-only"
-        c_ok "then:  agent-tools doctor"
+        c_ok "next:  agent-tools install-machine          # binaries + plugins back"
+        c_ok "then:  cd <project> && agent-tools init && agent-tools refresh --code-only"
+        c_ok "then:  agent-tools doctor    and    agent-tools tools"
         ;;
 
       *) c_bad "usage: agent-tools migrate export [FILE] | import <FILE> [--force]"; return 2 ;;
@@ -1145,6 +1999,11 @@ install_machine() {
     if [ "$MEMORY_BACKEND" = none ]; then
         hdr "3. memory — SKIPPED (--memory=none)"
         c_ok "graphify is set up; no memory backend requested"
+        # --memory=none used to return here and skip the optional tools too,
+        # so "no memory backend" silently meant "no rtk, no skills either".
+        install_extras
+        hdr "Next"
+        echo "  cd <your-project> && agent-tools init"
         return
     fi
 
@@ -1170,7 +2029,7 @@ install_machine() {
               || c_bad "claude-mem install failed — try: npx claude-mem install"
         fi
         remember_backend claude-mem
-        install_caveman
+        install_extras
         hdr "Next"
         echo "  cd <your-project> && agent-tools init"
         echo "  claude-mem has NO bulk importer; to replay past sessions see"
@@ -1252,7 +2111,7 @@ install_machine() {
         fi
     else c_warn "claude CLI not found — install it, then re-run"; fi
 
-    install_caveman
+    install_extras
     hdr "Next"
     echo "  cd <your-project> && agent-tools init"
     echo "  MANUAL: memory data does not migrate. See 'agent-tools help'."
@@ -1492,7 +2351,11 @@ INSTR
     hdr "Done"
     echo "  agent-tools doctor    verify"
     echo "  agent-tools refresh   after a batch of work"
+    echo "  agent-tools tools     optional tools, and what overlaps here"
     echo "  touch .git/graphify-auto-update-ENABLED   to auto-update on commit"
+    echo
+    echo "  Want a second code graph in THIS repo only? (see docs/TOOLS.md first)"
+    echo "      agent-tools install code-review-graph && agent-tools wire code-review-graph"
 }
 
 # ---------------------------------------------------------------------------
@@ -1633,6 +2496,19 @@ refresh() {
     local n total
     n="$(graphify query "architecture overview" 2>/dev/null | grep -c '^NODE')"
     total="$("$PY" -c "import json;print(len(json.load(open('graphify-out/graph.json'))['nodes']))" 2>/dev/null || echo 0)"
+    # "architecture overview" is a phrase, and a graph is free to contain no
+    # node matching it -- this repo does not. Reporting that as a broken graph
+    # is a false alarm, and a check that cries wolf gets ignored. So before
+    # failing, ask the graph about a symbol it definitely has.
+    if [ "${n:-0}" -eq 0 ] && [ "${total:-0}" -gt 0 ]; then
+        local probe
+        probe="$("$PY" -c "
+import json
+nodes = json.load(open('graphify-out/graph.json'))['nodes']
+name = next((n.get('id') or n.get('name') for n in nodes if (n.get('id') or n.get('name'))), '')
+print(name)" 2>/dev/null)"
+        [ -n "$probe" ] && n="$(graphify query "$probe" 2>/dev/null | grep -c '^NODE')"
+    fi
     if [ "${n:-0}" -gt 0 ]; then
         c_ok "query returns $n nodes — graph answers"
     elif [ "${total:-0}" -lt 25 ]; then
@@ -1903,7 +2779,12 @@ case "${1:-help}" in
     doctor)            doctor ;;
     install-machine)   install_machine ;;
     caveman)           shift; caveman_cmd "${1:-status}" ;;
-    update|upgrade)    shift; update_cmd "${1:-all}" ;;
+    tools)             tools_cmd ;;
+    install)           shift; install_tool_cmd "$(first_nonflag "$@")" ;;
+    uninstall|remove)  shift; uninstall_tool_cmd "$(first_nonflag "$@")" ;;
+    wire)              shift; wire_tool_cmd wire "$(first_nonflag "$@")" ;;
+    unwire)            shift; wire_tool_cmd unwire "$(first_nonflag "$@")" ;;
+    update|upgrade)    shift; update_cmd "$(first_nonflag "$@")" ;;
     migrate)           shift; migrate_cmd "${1:-}" "${2:-}" ;;
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;

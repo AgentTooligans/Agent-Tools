@@ -12,3 +12,6 @@ graphify-out/cache/*
 !graphify-out/cache/semantic-deep/
 !graphify-out/.graphify_labels.json
 !graphify-out/.graphify_labels.json.sig
+
+# code-review-graph index (generated, rebuildable)
+.code-review-graph/

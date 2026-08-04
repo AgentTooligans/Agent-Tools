@@ -5,9 +5,51 @@
 | macOS | full | launchd user agent | ✅ macOS 15 (Apple Silicon) |
 | Linux | full | systemd `--user` | ✅ Ubuntu 24.04 container |
 | WSL2 | full | systemd `--user` | ✅ Windows 11 + Ubuntu 26.04, systemd on |
-| Windows native | **graphify only** | none | ✅ Win 11 + Git Bash |
+| Windows native | everything except **agentmemory**; rtk needs cargo or a zip | none | ✅ Win 11 + Git Bash |
 
 "Verified" means the tool was actually run there, not that it should work.
+
+## Per tool
+
+| tool | macOS | Linux | WSL2 | Windows native | installed via |
+|---|---|---|---|---|---|
+| graphify | ✅ | ✅ | ✅ | ✅ | uv |
+| claude-mem | ✅ | ✅ | ✅ | ✅ | npm |
+| agentmemory | ✅ | ✅ | ✅ | ❌ **upstream** | npm |
+| caveman | ✅ | ✅ | ✅ | ✅ | npx / skills |
+| rtk | ✅ brew | ✅ install.sh | ✅ install.sh | ⚠️ cargo or release zip | see below |
+| superpowers | ✅ | ✅ | ✅ | ✅ | claude plugin |
+| context-mode | ✅ | ✅ | ✅ | ✅ | claude plugin (Node ≥ 22.5) |
+| code-review-graph | ✅ | ✅ | ✅ | ✅ | uv |
+| token-savior | ✅ | ✅ | ✅ | ✅ | uv |
+
+Everything installed through **uv** or the **Claude plugin system** is
+platform-agnostic by construction. The two gaps are agentmemory (upstream ships
+no native-Windows engine) and rtk (below).
+
+### rtk on native Windows
+
+Upstream's `install.sh` is POSIX-only, so `agent-tools install rtk` there:
+
+1. uses `cargo install --git https://github.com/rtk-ai/rtk` when Rust is
+   present — which also sidesteps the crates.io name collision, since it names
+   the repo rather than the package;
+2. otherwise prints the release-zip instructions and stops, rather than
+   installing something that might be the wrong `rtk`.
+
+The hook it needs is a `settings.json` entry, not a native component, so it
+works identically once the binary exists. For full filter support on Windows,
+also install ripgrep: `winget install BurntSushi.ripgrep.MSVC`.
+
+### context-mode and the Node floor
+
+context-mode needs **Node >= 22.5**, one major version above agentmemory's
+floor of 20. On older Node it installs cleanly and then every hook fails at
+*runtime* — which reads as a broken session rather than a version problem. So
+`install-machine` checks first and skips it with an explanation.
+
+Ubuntu 24.04 — the most common WSL LTS — ships Node 18.19, so on a fresh WSL
+distro expect to install Node before either of them.
 
 ---
 

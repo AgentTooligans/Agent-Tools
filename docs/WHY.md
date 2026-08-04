@@ -338,3 +338,76 @@ Also from that day: `GRAPHIFY_API_TIMEOUT` defaults to 1800s for deep runs. A
 chunk that exceeds the 600s default is lost, which makes the run partial, which
 trips the node-count guard, which wastes the entire run — and a retry loop
 without the raised ceiling just hits the same wall on the same chunk.
+
+---
+
+## 2026-08-04 — an installer that succeeds and installs nothing
+
+`rtk init -g` is documented as the way to wire rtk's Claude Code hook. Run
+without a terminal — from a script, from CI, from another tool — it prints:
+
+```
+Patch existing /Users/<you>/.claude/settings.json? [y/N]
+(non-interactive mode, defaulting to N)
+
+  MANUAL STEP: Add this to /Users/<you>/.claude/settings.json:
+```
+
+…and **exits 0**. Anything driving it programmatically records a success. The
+binary is installed, the hook is not, and the only evidence is text on stdout.
+It also has no per-project form, and it appends an `@RTK.md` import to the
+**global** `CLAUDE.md` — a machine-wide edit, made even when what you asked for
+was one repo.
+
+So `agent-tools` does not call it. It writes the same `PreToolUse`/`Bash` entry
+itself, through a JSON edit that:
+
+- refuses to touch a `settings.json` it cannot parse (that file is somebody's
+  entire Claude Code configuration);
+- is idempotent — a second run reports "already present" rather than stacking
+  a duplicate hook;
+- appends to an existing `Bash` matcher instead of replacing it, so a repo that
+  already has `graphify hook-guard search` ends up with **both**;
+- removes cleanly, leaving every unrelated hook in the file untouched.
+
+Verified both directions on a settings file containing graphify's two hook
+entries: adding rtk left them intact, removing rtk left them intact.
+
+### The same day: two tools named `rtk`
+
+crates.io ships an unrelated **Rust Type Kit** under the same binary name.
+`rtk --version` prints a version for either one, so it is not a test. `rtk gain`
+exists only on `rtk-ai/rtk`, which is what `doctor` checks. Homebrew core's
+`rtk` formula is the right project (homepage `rtk-ai.app`). On native Windows,
+where upstream's `install.sh` does not run, `cargo install --git` names the
+repository and therefore cannot resolve to the wrong package.
+
+Related, smaller, same shape as graphify's `[gemini,mcp]`: **token-savior's
+extras are not remembered across an upgrade.** Without `[memory-vector]` it
+starts, prints *"vector search disabled"* to stderr, and degrades to
+keyword-only recall — working, quieter, worse. `agent-tools update` reinstalls
+with the extras named rather than running a bare `uv tool upgrade`.
+
+And one path detail with teeth: rtk's macOS config directory is
+`~/Library/Application Support/rtk` — **it contains a space**. A `tar` line
+that word-splits an unquoted path list turns that into three nonexistent
+arguments and silently ships an archive without your savings history.
+`migrate export` feeds tar a newline-delimited `-T` file for exactly this
+reason.
+
+### And: two Bash rewriters is not twice the saving
+
+`ts init` (token-savior) offers to write **ten** hook entries into the global
+`~/.claude/settings.json`. One of them is a `PreToolUse`/`Bash` command
+rewriter — the same job rtk's hook does. Stacked, they are not additive: each
+rewrites the command the other produced, and a command that returns something
+unexpected now has two filters to bisect.
+
+`agent-tools wire token-savior` therefore registers the MCP server and nothing
+else; the server does not need that hook. `doctor` flags the pair if it is
+already there, because the only way to end up with both is to have run
+`ts init` by hand and not connected it to rtk.
+
+(Unlike context-mode, which also hooks `PreToolUse`/`Bash`, this one genuinely
+conflicts. context-mode routes the *result*; rtk and token-savior both rewrite
+the *command*.)

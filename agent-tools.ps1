@@ -7,15 +7,20 @@
   with the same commands, translating your current directory into the path the
   Linux side expects.
 
-  It prefers WSL, because that is the only environment where BOTH tools work:
+  It prefers WSL, because that is the only environment where EVERY tool works:
   agentmemory upstream ships no engine installer for native Windows and
   `agentmemory connect` is unsupported there. If WSL is not present it falls
-  back to Git Bash, where graphify works and agentmemory does not.
+  back to Git Bash, where graphify, code-review-graph, token-savior,
+  superpowers and context-mode all work; agentmemory does not, and rtk needs
+  either Rust (`cargo install --git`) or the release zip on PATH.
 
 .EXAMPLE
   agent-tools doctor
   agent-tools init
   agent-tools refresh
+  agent-tools tools
+  agent-tools install rtk
+  agent-tools update all
   agent-tools install-machine -y
 #>
 [CmdletBinding()]
@@ -100,7 +105,9 @@ $gitBash = @(
 
 if ($gitBash) {
     Write-Host "  note: no WSL distro found — using Git Bash." -ForegroundColor Yellow
-    Write-Host "        graphify works here; agentmemory needs WSL2." -ForegroundColor Yellow
+    Write-Host "        graphify, code-review-graph, token-savior, superpowers and" -ForegroundColor Yellow
+    Write-Host "        context-mode work here. agentmemory needs WSL2; rtk needs" -ForegroundColor Yellow
+    Write-Host "        cargo or its release zip on PATH." -ForegroundColor Yellow
     # Git Bash understands C:\ paths but prefers /c/... ; it also accepts the
     # drive form, so just stay where we are.
     # Build the bash command by concatenation. Backtick-escaped quotes inside a

@@ -1,7 +1,22 @@
 # Other AI agents (including Codex)
 
-Both tools are agent-agnostic. `agent-tools` wires Claude Code by default
+Every tool here is agent-agnostic. `agent-tools` wires Claude Code by default
 because that is what it was built against, but nothing is Claude-specific.
+
+| tool | other agents it supports natively |
+|---|---|
+| graphify | MCP — any MCP host |
+| claude-mem | its own adapters (below) |
+| agentmemory | `agentmemory connect <agent>` (below) |
+| caveman | `npx skills add … -g` installs to `~/.agents/skills`, symlinked into every agent |
+| **rtk** | `rtk init --agent cursor\|windsurf\|cline\|kilocode\|antigravity\|kimi\|pi\|hermes\|droid`, plus `--gemini` and `--opencode` |
+| **context-mode** | Gemini CLI, VS Code / JetBrains Copilot, Copilot CLI, Cursor, OpenCode, KiloCode, Codex, Antigravity, Kimi, Qwen, Zed, Kiro, OMP — via `npm install -g context-mode` |
+| **code-review-graph** | `code-review-graph install --platform <cursor\|windsurf\|gemini-cli\|zed\|…>` |
+| **token-savior** | any MCP client |
+
+`agent-tools` wires the Claude Code side of each. For a second agent, run that
+tool's own command from the table — they are all idempotent, and none of them
+conflicts with what `agent-tools` wrote.
 
 ---
 
