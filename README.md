@@ -2,14 +2,14 @@
 
 **Agent Tools helps you write better code with an AI assistant - While using fewer tokens!**
 
-If you use Claude codex, Codex, (or others), you'll know how dumb agents can be,
-and how much can be useful - and also suck.  They forget things, burn tokens, 
-and rush to code without stopping and asking the right questions.  
+If you use Claude Code, Codex, (or others), you'll know how dumb agents can be,
+and how much can be useful - and also suck.  They forget things, burn tokens,
+and rush to code without stopping and asking the right questions.
 
 Thankfully, some smarter people than I have created tools to help solve this problem. I
 compiled the tools I found most useful into one application.  These tools will/can change,
 so you may need to update often.  The whole AI space is very fluid.  It also installs
-the tools in CLI mode by default to reduce your token usage.  It udpates your AGENT.MD file
+the tools in CLI mode by default to reduce your token usage.  It updates your AGENTS.md file
 so you only burn tokens when you use a tool.  If you want the MCP installed, you can do that
 too!
 

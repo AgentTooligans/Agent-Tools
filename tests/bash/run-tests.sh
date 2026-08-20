@@ -224,6 +224,13 @@ check "9c --short prints only the number" \
     $(printf '%s' "$out" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' && echo 0 || echo 1) "$out"
 # VERSION and VERSION_DATE must both exist and be plausible, because install.sh
 # reads them straight out of the file.
+# LAW: drift detection must compare CONTENT. Comparing version strings alone
+# missed a 46-line difference during development, because an edit without a
+# version bump looks identical to the check.
+check "9c2 drift detection hashes the file, not just VERSION" \
+    $(grep -q 'file_hash' "$AT" && echo 0 || echo 1)
+check "9c3 the same-version drift warning exists" \
+    $(grep -q 'same version, different content' "$AT" && echo 0 || echo 1)
 check "9d VERSION is set" $(grep -qE '^VERSION=[0-9]+\.[0-9]+\.[0-9]+$' "$AT" && echo 0 || echo 1)
 check "9e VERSION_DATE is set" $(grep -qE '^VERSION_DATE=[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$AT" && echo 0 || echo 1)
 if [ -f "$INSTALL_SH" ]; then

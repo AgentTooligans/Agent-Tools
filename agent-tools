@@ -3691,6 +3691,15 @@ stop_cmd() {
 #              and forgot to re-run install.sh
 # ---------------------------------------------------------------------------
 
+# Content hash of a file. Used to catch a PATH copy that has the same version
+# string as the checkout but different bytes.
+file_hash() {
+    [ -f "$1" ] || return 1
+    if have shasum; then shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    elif have sha256sum; then sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    else cksum "$1" 2>/dev/null | awk '{print $1}'; fi
+}
+
 # stat has no portable format string: BSD/macOS uses -f, GNU uses -c.
 file_mtime() {
     [ -e "$1" ] || return 1
@@ -3719,6 +3728,24 @@ version_cmd() {
         if [ -n "$sv" ] && [ "$sv" != "$VERSION" ]; then
             c_warn "the copy on your PATH is $sv, but this file is $VERSION"
             c_warn "    re-run ./install.sh from the checkout"
+        fi
+    fi
+
+    # LAW: COMPARE CONTENT, NOT THE VERSION STRING.
+    # The check above only fires when the version NUMBER differs, so editing
+    # the script without bumping VERSION -- which is every edit during
+    # development -- left an installed copy silently 46 lines behind while
+    # `version` reported both as 3.4.0 and said nothing. A version string is a
+    # label someone remembers to change; a checksum is the truth.
+    local rec_src; rec_src="$(recorded_source 2>/dev/null)"
+    if [ -n "$rec_src" ] && [ -f "$rec_src/agent-tools" ] && [ -e "${self:-}" ] \
+       && [ "$rec_src/agent-tools" != "$self" ]; then
+        local a b
+        a="$(file_hash "$rec_src/agent-tools")"
+        b="$(file_hash "$self")"
+        if [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ]; then
+            c_warn "the copy on your PATH DIFFERS from the checkout"
+            c_warn "    same version, different content — re-run ./install.sh"
         fi
     fi
 
