@@ -1,4 +1,24 @@
-# The tools, and how to choose between them
+# Which tool should I use?
+
+Some of these tools overlap. That's not an accident of packaging — they're
+genuinely different answers to the same question, built by different people
+with different priorities. This page is here so you can pick the right one
+instead of installing all of them and paying for the privilege.
+
+If you only read one thing: **running two code-graph tools at once costs you
+tokens in every single session, whether you use them or not.** Pick the one
+that fits how you work, and leave the others out.
+
+> **What do I actually have?** `agent-tools status` lists every tool below with
+> its version, plus the ones you have not installed and the command for each.
+> `agent-tools uninstall <name|all>` removes them, naming any data that would be
+> lost first — see [UPDATING.md](UPDATING.md#removing-things).
+>
+> **Not using Claude Code?** Every tool below has a CLI, and the CLI costs zero
+> tokens per session where an MCP server costs its whole schema. `agent-tools
+> agents` shows how each installed agent gets them. Since 3.4.0 `agent-tools
+> init` wires **no** MCP server by default — add one per repo with `init
+> --add-mcp` or `wire <name>`. See [AGENTS.md](AGENTS.md).
 
 `agent-tools` installs seven things. Three of them overlap heavily with each
 other, and two more overlap with your memory backend. This page is the map:
@@ -18,11 +38,13 @@ though every tool's README says "saves 90% of your tokens".
 | where the tokens go | what fixes it |
 |---|---|
 | reading source files to find things | **graphify** / code-review-graph / token-savior |
-| re-deriving decisions from past sessions | **claude-mem** / agentmemory |
+| re-deriving decisions from past sessions | **claude-mem** |
 | what the model says back to you | **caveman** |
 | output of shell commands (`git status`, test runs) | **rtk** |
 | re-reading everything after a compaction | **context-mode** |
 | doing the work the long way round | **superpowers** |
+| round trips spent on a plan nobody pinned down | **pocock** (`/grill-me`) |
+| re-explaining context to the next session | **pocock** (`/handoff`) |
 
 Pick one per row. Two per row is the mistake this page exists to prevent.
 
@@ -33,10 +55,11 @@ Pick one per row. Two per row is the mistake this page exists to prevent.
 | tool | installed by default? | what it is | per-session cost when idle |
 |---|---|---|---|
 | [graphify](#graphify) | yes | code knowledge graph, MCP + CLI | 10 MCP tools (~1.5k tokens) |
-| [claude-mem / agentmemory](MEMORY.md) | yes (pick one) | persistent memory | claude-mem injects at session start; agentmemory 8 tools (~1k) |
+| [claude-mem](MEMORY.md) | yes | persistent memory | injects context at session start |
 | [caveman](CAVEMAN.md) | yes | output-compression instructions | a short instruction block |
 | [rtk](#rtk) | yes | Bash output filter (hook) | zero — a hook, no schema |
 | [superpowers](#superpowers) | yes | skills library | ~nothing until a skill fires |
+| [pocock](SKILLS.md) | yes | 4 skills: `/grill-me`, `/handoff`, `/wait-what` (+ `grilling`) | ~100 tokens of descriptions |
 | [context-mode](#context-mode) | yes | tool-output sandbox + session continuity | its MCP schema + six hooks |
 | [code-review-graph](#code-review-graph) | **no — opt-in** | second code graph | **30 MCP tools** |
 | [token-savior](#token-savior) | **no — opt-in** | third code graph + its own memory | its MCP schema |
@@ -132,12 +155,14 @@ runs a command unfiltered, which is the first thing to try.
 ## Memory — one capturer, always
 
 Covered in full in [MEMORY.md](MEMORY.md). The rule that matters here:
-**exactly one thing should be capturing sessions.** Both claude-mem and
-agentmemory hook the session lifecycle; so does token-savior's memory engine;
-so, partly, does context-mode.
+**exactly one thing should be capturing sessions.** claude-mem hooks the
+session lifecycle; so does token-savior's memory engine; so, partly, does
+context-mode. And a machine upgraded from before 3.3.0 may still be running a
+legacy agentmemory, which hooks it too — `doctor` detects that and points at
+`agent-tools memory migrate-from-agentmemory`.
 
-- claude-mem / agentmemory: durable memory of **decisions and rationale**,
-  searchable months later.
+- claude-mem: durable memory of **decisions and rationale**, searchable months
+  later.
 - context-mode: **session continuity** — surviving a compaction inside one
   long session. It is not a replacement for a memory backend and does not try
   to be.
@@ -202,9 +227,38 @@ collaboration patterns.
 approached — write the failing test first, bisect instead of guess.
 **Costs:** effectively nothing until a skill is invoked; skills load on demand.
 
-It is the only tool here that does not claim to save tokens, and it is in the
+It is one of two tools here that do not claim to save tokens, and it is in the
 default set because the cheapest tokens are the ones spent on the right
 approach the first time.
+
+### pocock
+
+<https://github.com/mattpocock/skills>. Four skills installed globally into
+`~/.agents/skills`, so every agent gets them and not just Claude Code.
+
+| skill | what it does |
+|---|---|
+| `/grill-me` | interviews you one question at a time until every branch of a plan is resolved |
+| `grilling` | the engine `/grill-me` delegates to — also fires on "grill" phrasing |
+| `/handoff` | compacts the conversation into a handoff doc for the next agent |
+| `/wait-what` | re-pitches a message that did not land, in Simplified Technical English |
+
+**Best at:** the round trips you never have to spend. A plan pinned down before
+implementation, or a handoff written once instead of re-derived by the next
+session, is worth more than any output filter.
+**Costs:** ~100 tokens of skill descriptions per session. Three of the four set
+`disable-model-invocation: true`, so the model cannot fire them on its own.
+
+Two things `agent-tools` handles:
+
+- **`grilling` is mandatory.** `/grill-me` is a two-line stub that delegates to
+  it. Installed alone it fires and dead-ends, so a partial pack is reported as
+  **not installed**.
+- **`skills add --skill 'a,b,c'` installs nothing and exits 0** — a comma list
+  matches no skill. One flag per skill.
+
+Full detail, including how to add the other 31 skills in that repo:
+[SKILLS.md](SKILLS.md).
 
 ### context-mode
 
@@ -267,8 +321,8 @@ they are upstream's.
 
 **Best at:** covering navigation *and* memory with one install — genuinely
 attractive on a machine running `--memory=none`.
-**Costs:** on a machine that already has claude-mem or agentmemory, half of it
-is a second store recording the same sessions.
+**Costs:** on a machine that already has claude-mem, half of it is a second
+store recording the same sessions.
 
 Two details `agent-tools` handles for you:
 
@@ -352,15 +406,19 @@ instead of pretending the flag did something.
 ## Updating
 
 ```bash
-agent-tools update              # graphify + memory + every installed tool + self
+agent-tools update              # graphify + claude-mem + every installed tool + self
+agent-tools update all          # same thing, explicit
 agent-tools update tools        # only the optional tools
+agent-tools update memory       # just claude-mem, and restart its worker
+agent-tools update pocock       # just the skill pack
 agent-tools update rtk          # one thing
 agent-tools update crg          # aliases work: crg, ts, ctx, superpower
+agent-tools update self         # git pull + ./install.sh in your checkout
 ```
 
 `update` never installs something you do not already have — an update command
-that quietly adds tools is not an update command. Per-tool footguns are in
-[UPDATING.md](UPDATING.md).
+that quietly adds tools is not an update command. Per-tool footguns, and what
+must be restarted afterwards, are in [UPDATING.md](UPDATING.md).
 
 ---
 
@@ -391,9 +449,11 @@ agent-tools tools                         # confirm
 | code-review-graph | ✅ uv | ✅ uv | ✅ uv | ✅ uv |
 | token-savior | ✅ uv | ✅ uv | ✅ uv | ✅ uv |
 | claude-mem | ✅ | ✅ | ✅ | ✅ |
-| agentmemory | ✅ | ✅ | ✅ | ❌ upstream |
+| caveman | ✅ | ✅ | ✅ | ✅ |
+| pocock | ✅ | ✅ | ✅ | ✅ |
 
-rtk is the only new tool with a platform gap: upstream's `install.sh` does not
+rtk is now the only tool with a platform gap (agentmemory, the other one, was
+removed in 3.3.0): upstream's `install.sh` does not
 cover native Windows. `agent-tools` uses `cargo install --git` there when Rust
 is present — which also sidesteps the crates.io name collision — and otherwise
 points you at the release zip. Everything else installs through uv, npm or the

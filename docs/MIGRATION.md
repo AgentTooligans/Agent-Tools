@@ -1,4 +1,15 @@
-# Moving to another computer, and managing keys
+# Moving to a new computer
+
+Most of what makes your setup *yours* lives outside the repo — your memory
+store, your graphs, your config, your keys. Cloning the repo on a new machine
+gets you none of it.
+
+This page is the checklist for moving the rest. There's a command that does the
+whole thing (`agent-tools migrate export` / `import`), and there's a manual
+path if you'd rather see exactly what's being copied. Both are here.
+
+There's also a section on API keys at the end, because "copy everything" is
+exactly the wrong instinct with those.
 
 A checklist. The *why* behind each item is in [WHY.md](WHY.md) §1; this page is
 what to actually do.
@@ -32,7 +43,7 @@ Nothing below is in any git repo. Sizes are from a real macOS install
 | path | size | what it is |
 |---|---|---|
 | `~/.claude-mem/` | 11 M | **claude-mem memory store** — SQLite + Chroma vectors. Every summary and observation. |
-| `~/.agentmemory/` | 68 M | agentmemory store (if you use that backend). Exclude `bin/iii` — see below. |
+| `~/.agentmemory/` | 68 M | **legacy** agentmemory store, if this machine predates 3.3.0. The backend is removed but the data is not — carry it, or run `agent-tools memory migrate-from-agentmemory` first and carry `~/.claude-mem` instead. Exclude `bin/iii` — see below. |
 | `~/.claude/projects/` | 192 M | **every session transcript.** This is `claude --resume` history *and* the only source a bulk memory re-import could read. |
 | `~/.config/graphify/env` | small | API keys. **Prefer rotating over copying** — see Part 4. |
 | `~/.claude/context-mode/` | grows | **context-mode's sessions and indexed content** (SQLite FTS5). This is the "continue where I left off" data — nothing regenerates it. |
@@ -59,7 +70,7 @@ npx claude-mem stop        # then copy ~/.claude-mem/
 | `~/.claude/settings.json` | global Claude Code hooks/settings. |
 | `~/.claude/.caveman-active` | caveman level; a fresh install starts at `full`. |
 | the `PreToolUse`/`Bash` hook in `~/.claude/settings.json` | rtk stops filtering — it is installed but inert. `agent-tools install rtk` puts the entry back. |
-| `~/Library/LaunchAgents/com.agentmemory.server.plist` (macOS)<br>`~/.config/systemd/user/agentmemory.service` (Linux/WSL) | no supervised memory server. `install-machine` recreates it. |
+| `~/Library/LaunchAgents/com.agentmemory.server.plist` (macOS)<br>`~/.config/systemd/user/agentmemory.service` (Linux/WSL) | nothing — these are **legacy**. Since 3.3.0 no service is installed at all; claude-mem's worker is started with `npx claude-mem start`. Do not carry them. |
 
 ### 🟢 Do NOT copy — reinstall instead
 
@@ -70,7 +81,7 @@ These are large, machine-specific, and rebuilt correctly by `install-machine`:
 | `~/.local/share/uv/tools/graphifyy/` | 170 M | a venv with absolute paths and a platform-specific interpreter |
 | `~/.claude/plugins/` | 580 M | plugin caches; caveman, claude-mem, superpowers and context-mode all reinstall themselves. Their **data** is elsewhere and *is* copied — `~/.claude/context-mode/` above. |
 | `~/.local/bin/` | — | `install.sh` puts `agent-tools` and the helper scripts back |
-| `~/.agents/skills/` | 120 K | recreated by `agent-tools caveman install` |
+| `~/.agents/skills/` | 120 K | recreated by `agent-tools install caveman` and `agent-tools install pocock` — or both at once via `install-machine` |
 | `~/.claude/skills/` | — | symlinks into `~/.agents/skills` |
 | `~/.agentmemory/bin/iii` | — | a copied engine binary is the **wrong architecture** — delete it and it re-downloads |
 | `~/.cache/graphify-rebuild.log`, `*.pid`, `engine-state.json` | — | logs and stale PIDs; stale PIDs can make `stop --force` signal an unrelated process |
@@ -167,12 +178,14 @@ EOF
 
 `~` above means the user's home directory. Most of these tools resolve it the
 same way everywhere (Node's `os.homedir()`, Python's `Path.home()`), so the
-layout is identical on macOS, Linux and WSL. Only three things genuinely differ:
+layout is identical on macOS, Linux and WSL. Since 3.3.0 the service-manager
+row is gone — nothing installs a launchd or systemd unit any more — so only
+three things genuinely differ:
 
 | | macOS | Linux / WSL2 | Windows (native) |
 |---|---|---|---|
 | home | `/Users/<you>` | `/home/<you>` | `C:\Users\<you>` — write paths as `%USERPROFILE%\.claude` |
-| service manager | launchd:<br>`~/Library/LaunchAgents/com.agentmemory.server.plist` | systemd user unit:<br>`~/.config/systemd/user/agentmemory.service` | none — Task Scheduler; **agentmemory is unsupported natively, use WSL2** |
+| service manager | **none needed** | **none needed** | **none needed** |
 | uv tool install | `~/.local/share/uv/tools/` | `~/.local/share/uv/tools/` | `%APPDATA%\uv\tools\` |
 | rtk config + savings history | `~/Library/Application Support/rtk/` — **contains a space** | `~/.config/rtk/` | `%APPDATA%\rtk\` |
 
@@ -195,9 +208,11 @@ concluding a directory is missing:
 | `CLAUDE_MEM_DATA_DIR` | `~/.claude-mem` (the memory store) |
 | `XDG_CONFIG_HOME` | `~/.config` on Linux, hence `agent-tools` and `graphify` config |
 
-agentmemory is the exception with a trap of its own: its store location is
-decided by the **server's working directory**, not by `AGENTMEMORY_DATA_DIR`
-(documented but inert). See [WHY.md](WHY.md) §3.
+A legacy agentmemory store is the exception with a trap of its own: its
+location was decided by the **server's working directory**, not by
+`AGENTMEMORY_DATA_DIR` (documented but inert). So `~/.agentmemory` is where
+`agent-tools` put it, not necessarily where yours is — check before assuming.
+See [WHY.md](WHY.md) §3.
 
 ### Sizes are indicative, not fixed
 
@@ -208,9 +223,14 @@ du -sh ~/.claude-mem ~/.claude/projects ~/.agentmemory 2>/dev/null
 ```
 
 ```powershell
-# Windows
-Get-ChildItem "$env:USERPROFILE\.claude-mem","$env:USERPROFILE\.claude" -Recurse |
-  Measure-Object Length -Sum
+# Windows — same idea as du -sh, reported in MB
+"$env:USERPROFILE\.claude-mem", "$env:USERPROFILE\.claude", "$env:USERPROFILE\.agentmemory" |
+  Where-Object { Test-Path $_ } |
+  ForEach-Object {
+    $mb = (Get-ChildItem $_ -Recurse -File -ErrorAction SilentlyContinue |
+           Measure-Object Length -Sum).Sum / 1MB
+    "{0,8:N1} MB  {1}" -f $mb, $_
+  }
 ```
 
 **Must NOT be copied — copying these *causes* breakage:**
@@ -300,8 +320,13 @@ agent-tools install-machine
 # 3. STOP the worker install-machine just started, before overwriting its store
 npx claude-mem stop
 
-# 4. restore. -k refuses to clobber anything already there; drop it to overwrite
-tar xzkf ~/agent-move.tgz -C "$HOME"          # .claude-mem, .claude.json, .config/*
+# 4. restore. -k refuses to clobber anything already there; drop it to overwrite.
+#    NAME THE MEMBERS on the first extract. A bare `tar x -C "$HOME"` unpacks the
+#    WHOLE archive, and the second -C group was stored under bare names, so
+#    CLAUDE.md, RTK.md, settings.json, plans/ and projects/ would ALSO land
+#    loose in your home directory. Verified 2026-08-19.
+tar xzkf ~/agent-move.tgz -C "$HOME" \
+  .claude-mem .claude.json .config/graphify .config/agent-tools
 mkdir -p ~/.claude && tar xzkf ~/agent-move.tgz -C ~/.claude \
   CLAUDE.md RTK.md settings.json plans projects 2>/dev/null
 
@@ -342,14 +367,31 @@ already created.
 
 ### Windows / PowerShell
 
-`tar` ships with Windows 10+ and the same commands work in PowerShell; only the
-home variable changes:
+`tar` ships with Windows 10+ (it is bsdtar/libarchive, and it accepts the
+repeated `-C` this needs — verified against bsdtar 3.5.3). Only the home
+variable and the separators change. **Stop the worker first**, exactly as in the
+bash version above.
 
 ```powershell
-tar czf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE `
+# archive — note the SECOND -C, without which you lose your transcripts,
+# your global CLAUDE.md, RTK.md, settings.json and plans
+tar czf $env:USERPROFILE\agent-move.tgz `
+  -C $env:USERPROFILE .claude-mem .claude.json .config\graphify .config\agent-tools `
+  -C $env:USERPROFILE\.claude CLAUDE.md RTK.md settings.json plans projects
+
+# restore, on the new machine, after install-machine and `npx claude-mem stop`.
+# Name the members on the first extract, or the second -C group also lands
+# loose in your profile root.
+tar xzkf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE `
   .claude-mem .claude.json .config\graphify .config\agent-tools
-tar xzkf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude" | Out-Null
+tar xzkf $env:USERPROFILE\agent-move.tgz -C $env:USERPROFILE\.claude `
+  CLAUDE.md RTK.md settings.json plans projects
 ```
+
+`agent-tools migrate export` does all of this and more (it follows the
+`@`-imports in your global `CLAUDE.md`, and carries context-mode, token-savior
+and rtk data too). Prefer it; the above is the manual fallback.
 
 Remember that **WSL2 is a separate machine** with its own home — archive and
 restore inside the distro, not from the Windows profile.
@@ -453,5 +495,5 @@ Order matters:
 |---|---|---|
 | claude-mem server API key | created by `claude-mem server api-key create` | only exists on the `--runtime server` path |
 | claude-mem telemetry ID | `~/.claude-mem/telemetry.json` | random UUID; telemetry is **on by default** — `npx claude-mem telemetry disable` |
-| agentmemory | none | local server, no key |
-| caveman | none | skills only, no service |
+| legacy agentmemory | none | local server, no key |
+| caveman, pocock | none | skills only, no service, no credentials |

@@ -1,131 +1,123 @@
-# The memory server: startup, restarts, and reboots
+# The memory worker: when it runs, and when it doesn't
 
-Which service you have depends on your memory backend. graphify is a CLI — it
-runs when you call it and exits, so there is never anything to supervise there.
+**The short version: nothing here installs a background service.** No launchd
+plist, no systemd unit, nothing that survives a reboot on its own.
+
+That's deliberate, and it's a change from earlier versions. We used to
+supervise a memory server, and supervising it turned out to cause more problems
+than it solved — the details are further down if you're curious.
+
+What you're left with is simpler: a lightweight worker that you start when you
+want it, and that `agent-tools doctor` will tell you about if it isn't running.
+
+graphify is a CLI — it runs when you call it and exits, so there was never
+anything to supervise there. claude-mem runs a worker, but it manages its own
+lifecycle and its store path is absolute, so it does not need one either.
 
 | backend | what runs | supervised? |
 |---|---|---|
 | **claude-mem** (default) | worker on :37701 + web UI | **no unit** — `npx claude-mem start` |
-| **agentmemory** | server on :3111 | yes — launchd / systemd |
-
-**claude-mem** needs no launchd or systemd unit. Its installer says plainly:
-*"Worker autostart skipped — start it manually with `npx claude-mem start`."*
-That is lighter than agentmemory, but it is **not nothing**: if the worker is
-not running, capture does not happen. `agent-tools doctor` checks :37701.
-
-Everything below concerns **agentmemory**, which is the backend that genuinely
-needs supervising.
+| **none** | nothing | — |
 
 ---
 
-## What runs where
+## claude-mem: the one thing you must know
 
-| platform | supervisor | starts at | survives reboot |
-|---|---|---|---|
-| macOS | launchd user agent | login | ✅ automatically |
-| Linux | systemd `--user` + linger | boot | ✅ automatically |
-| WSL2 | systemd `--user` | **when the distro starts** | ⚠️ see below |
-| Windows native | none | — | ❌ not supported |
+The installer says plainly:
 
-### Why not cron?
+> *Worker autostart skipped — start it manually with `npx claude-mem start`.*
 
-cron is a scheduler, not a supervisor. It can start something at a time, but it
-will not restart a crashed process, does not track state, and gives you no
-status command. launchd and systemd both restart on failure — which matters,
-because the memory engine can die and you would otherwise never notice. That is
-why `agent-tools` uses them and not a `@reboot` cron line.
+That is lighter than a supervised server, but it is **not nothing**: if the
+worker is not running, capture does not happen. Nothing warns you in the
+session — memories simply never appear.
+
+```bash
+npx claude-mem start      # start it
+npx claude-mem stop       # stop it
+curl -s localhost:37701   # raw check
+agent-tools doctor        # checks :37701 and names the fix
+```
+
+`agent-tools doctor` reports the worker under **Memory backend**. If you only
+ever run one command from this page, run that one.
+
+### Making it start at login
+
+There is no unit, so nothing starts it for you after a reboot. Pick whichever
+of these you prefer — none is installed automatically, because a worker you
+did not ask for is exactly the kind of surprise this repo tries not to create.
+
+**macOS / Linux / WSL2** — add it to your shell profile:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+(command -v npx >/dev/null && curl -sf -m 1 http://127.0.0.1:37701 >/dev/null 2>&1) \
+    || npx claude-mem start >/dev/null 2>&1 &
+```
+
+The `curl` guard means opening ten terminals does not start ten workers.
+
+**Or just let `agent-tools doctor` tell you.** Most people run it when
+something looks wrong, and it prints the exact command.
 
 ---
 
-## macOS
+## WSL2
 
-`~/Library/LaunchAgents/com.agentmemory.server.plist` with `RunAtLoad` and
-`KeepAlive` on failure. Log in, it starts. It crashes, launchd restarts it.
+Nothing special is required any more. Before 3.3.0 this section described a
+reboot gap: WSL distros do not start when Windows starts, so systemd inside the
+distro was not running, so the supervised memory server was not running. With
+no unit in the picture, the gap is gone — the worker starts when you start it,
+the same as on any other platform.
 
-```bash
-launchctl print gui/$(id -u)/com.agentmemory.server   # status
-launchctl bootout  gui/$(id -u)/com.agentmemory.server  # stop
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentmemory.server.plist
-```
+You no longer need `systemd=true` in `/etc/wsl.conf` for memory, and you no
+longer need `loginctl enable-linger` on Linux. If you set either of those up
+for agent-tools specifically, they are now inert as far as this project is
+concerned. (Other software on your machine may still want them.)
 
-## Linux
-
-`~/.config/systemd/user/agentmemory.service`, enabled, with `Restart=on-failure`.
-`install-machine` also runs `loginctl enable-linger`, **without which the service
-stops when you log out** and never starts on a headless boot.
-
-```bash
-systemctl --user status agentmemory
-systemctl --user restart agentmemory
-journalctl --user -u agentmemory -n 50
-```
-
-## WSL2 — the reboot gap
-
-This is the one that surprises people.
-
-**WSL distros do not start when Windows starts.** systemd inside the distro only
-starts when the distro itself does — which happens the first time you open a WSL
-terminal, or when something invokes `wsl.exe`. So after a Windows restart:
-
-- the distro is stopped
-- systemd is not running
-- the memory server is **not running**
-- it starts the moment you open WSL, and then keeps running
-
-For most people that is fine: you open a terminal before you do any work, and
-the server is up by the time an agent needs it.
-
-**If you want it up without opening a terminal**, add a logon task that boots the
-distro. In an Administrator PowerShell:
-
-```powershell
-$action  = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu --exec /bin/true"
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName "Start WSL at logon" -Action $action -Trigger $trigger `
-    -Description "Boots the WSL distro so its systemd services (agentmemory) start."
-```
-
-Running `/bin/true` is enough — starting the distro starts systemd, which starts
-the service. Replace `Ubuntu` with your distro name from `wsl -l -q`.
-
-To remove it:
-
-```powershell
-Unregister-ScheduledTask -TaskName "Start WSL at logon" -Confirm:$false
-```
-
-Also confirm systemd is actually on, or there is no supervisor at all:
-
-```ini
-# /etc/wsl.conf
-[boot]
-systemd=true
-```
-then `wsl --shutdown` from Windows and reopen.
+---
 
 ## Windows native
 
-No service is installed, because agentmemory does not run properly there — its
-engine has no PowerShell/scoop/winget installer and `connect` is unsupported.
-`agent-tools` sets up graphify and says so. Use WSL2.
+Supported. Before 3.3.0 this page said "not supported", because the agentmemory
+backend had no Windows engine installer. That backend is gone, and claude-mem
+is plain Node — it runs under Git Bash or WSL alike.
 
-If you insist on native Windows, you would fetch
-`iii-x86_64-pc-windows-msvc.zip` from the iii releases, put `iii.exe` on PATH,
-and register a Task Scheduler job running `agentmemory --tools core` with its
-working directory set to `%USERPROFILE%\.agentmemory` — the working directory is
-not optional, see [WHY.md](WHY.md).
+The only remaining Windows gap is **rtk**, which ships no scoop/winget package.
+Install Rust and `cargo install --git https://github.com/rtk-ai/rtk`, or put the
+release zip's binary on PATH. See [PLATFORMS.md](PLATFORMS.md).
 
 ---
 
-## Checking it, whatever the platform
+## Legacy: retiring a pre-3.3.0 agentmemory service
+
+If this machine was set up by an older agent-tools, it may still have a
+supervised agentmemory server. `agent-tools doctor` detects one and says so —
+loudly, if it is capturing at the same time as claude-mem, because then every
+tool call fires two hook sets into two stores.
+
+One command retires it. **Your data is not deleted**: the store at
+`~/.agentmemory` is left byte-for-byte intact, and a Markdown export is written
+first.
 
 ```bash
-agent-tools doctor              # names the exact problem and fix
-curl -s localhost:3111/agentmemory/health   # raw check
-agentmemory status              # sessions, memories, flags
+agent-tools memory migrate-from-agentmemory
 ```
 
-A useful detail: the engine downloads a binary on first run, so immediately
-after installation the health check can fail for a few seconds while the service
-is genuinely fine. Give it ~30s before concluding anything.
+It exports the store, imports what it can into claude-mem through claude-mem's
+own hook pipeline, then stops the server, disables the unit (keeping the file
+as `.disabled`), disables the Claude Code plugin, and removes the stale MCP
+entry.
+
+To check by hand what is still there:
+
+```bash
+# macOS
+launchctl print gui/$(id -u)/com.agentmemory.server
+# Linux / WSL2
+systemctl --user status agentmemory
+journalctl --user -u agentmemory -n 50
+```
+
+Why that migration is one-way, and why the old server needed supervising at
+all, is in [WHY.md](WHY.md) and [MEMORY.md](MEMORY.md).

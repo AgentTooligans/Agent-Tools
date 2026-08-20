@@ -1,6 +1,12 @@
 .DS_Store
 *.log
 
+# Ignore certain files and directories
+.claude/*
+.claude/**
+.claude
+.gitignore
+
 # Graphify knowledge graph. Derived output is ignored; the LLM-derived cache and
 # labels ARE committed — that is the expensive part (hours of extraction in a
 # couple of MB), and it lets a fresh clone rebuild the graph at zero LLM cost.
@@ -15,3 +21,34 @@ graphify-out/cache/*
 
 # code-review-graph index (generated, rebuildable)
 .code-review-graph/
+
+# ---------------------------------------------------------------------------
+# Private / machine-specific. None of this belongs in a public repo.
+# ---------------------------------------------------------------------------
+# Per-machine agent config. `agent-tools init` writes .claude/settings.json for
+# YOUR machine; committing it would push your hook setup onto everyone else.
+.claude/
+.codex/
+.cursor/
+.gemini/
+.antigravity/
+
+# Working notes from individual sessions. Useful locally, meaningless to
+# anyone else, and they tend to name whatever else you were working on.
+docs/session-notes/
+
+# Other tools' per-repo indexes and caches.
+.code-review-graph/
+.token-savior/
+.serena/
+
+# OS + editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Python bytecode from running the helper scripts
+__pycache__/
+*.pyc

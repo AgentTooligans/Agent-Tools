@@ -1,13 +1,21 @@
-# Using graphify and agentmemory well
+# Getting good use out of the graph and your memory
 
-Two tools, two different jobs. Knowing which answers a given question is most of
-the skill.
+These two tools do genuinely different jobs, and most of the skill in using
+them is knowing which one you actually want.
 
-| | **graphify** | **agentmemory** |
+The short version: **the graph knows what your code *is*. Memory knows what you
+*decided*.** If you're asking "what calls this function?", that's the graph. If
+you're asking "why on earth did we do it this way?", that's memory.
+
+This page covers when each one earns its keep, what the graph is genuinely bad
+at (there are real gaps — grep is still the right tool sometimes), and how to
+get your assistant to actually reach for them.
+
+| | **graphify** | **claude-mem** |
 |---|---|---|
 | answers | "what *is* this code, and what connects to what" | "what did we *do*, and why" |
 | source | your repo, parsed | your past sessions |
-| lives | `graphify-out/` in the project | one server, all projects |
+| lives | `graphify-out/` in the project | `~/.claude-mem/`, all projects |
 | cost | free for code; docs cost tokens once | free |
 
 Two opt-in tools — **code-review-graph** and **token-savior** — answer the same
@@ -126,9 +134,12 @@ Bash/Read/Glob it injects:
 This is the single most effective nudge, because it fires at the moment the
 agent is about to grep.
 
-**3. agentmemory's skills.** `npx skills add rohitg00/agentmemory` installs
-skills that teach an agent *when* to recall and save. `connect` makes the tools
-available; skills teach the judgment.
+**3. Skills teach judgment, MCP tools only grant capability.** Wiring a memory
+or graph MCP server makes tools *available*; it does not teach an agent *when*
+to reach for them. That is what a skill is for. `agent-tools` installs two
+packs globally (`caveman`, `pocock`) — see [SKILLS.md](SKILLS.md) — and
+`/grill-me` in particular is the one to reach for before implementation, when
+the cheapest thing you can do is pin the plan down.
 
 **4. Project instructions (strongest).** Put it in the file your agent already
 reads — `AGENTS.md`, or `CLAUDE.md` for Claude Code. `agent-tools init` offers

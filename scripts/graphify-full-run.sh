@@ -1,6 +1,6 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# graphify full LLM pass for a home-automation project — detached launchd job.
+# graphify full LLM pass for your-project — detached launchd job.
 #
 # Phase 1  semantic extraction (--mode deep) over docs + images, AST over code,
 #          wrapped in a retry loop so a plan rate-limit is a pause, not a death.
@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 set -u
 
-REPO="/Users/you/Projects/a home-automation project"
+REPO="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 LOGDIR="$HOME/graphify-backups"
 LOG="$LOGDIR/graphify-full-run.log"
 PASSLOG="$LOGDIR/.pass-current.log"

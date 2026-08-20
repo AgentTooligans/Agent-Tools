@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# agent-tools — set up graphify + agentmemory for ANY project, on any platform.
+# agent-tools — set up graphify + claude-mem for ANY project, on any platform.
 #
 # One self-contained file. No dependencies beyond bash, python3, and the tools
 # it installs.
@@ -15,23 +15,38 @@
 #   agent-tools help              long help, with the reasoning
 #
 # PLATFORM SUPPORT
-#   macOS          full         launchd service
-#   Linux          full         systemd --user service
-#   WSL2           full         systemd --user if enabled, else manual start
-#   Windows native PARTIAL      graphify only — see `agent-tools help`
+#   macOS          full
+#   Linux          full
+#   WSL2           full
+#   Windows native PARTIAL      no rtk binary by default — see `agent-tools help`
 #
-#   Native Windows is limited by agentmemory upstream, not by this script: its
-#   engine has no PowerShell/scoop/winget installer and `agentmemory connect` is
-#   unsupported there. Upstream's own advice is WSL2, and so is ours.
+#   Since 3.3.0 there is no supervised memory server: claude-mem runs its own
+#   worker and needs no launchd/systemd unit from us. That removed the last
+#   hard blocker on native Windows; what remains is rtk, which needs either
+#   Rust or the release zip on PATH.
 #
 # Every default here comes from an observed failure. The ones that will bite you
 # if changed are marked LAW.
 # ===========================================================================
 set -uo pipefail
-VERSION=3.2.0
+# VERSION / VERSION_DATE are the RELEASE identity and are bumped by hand at
+# release time. They must not be derived from git: the file that actually runs
+# on a user's machine is the copy install.sh drops in ~/.local/bin, which has
+# no repository around it and cannot ask git anything.
+VERSION=3.4.0
+VERSION_DATE=2026-08-20
+
+# Where this thing lives. `update self` uses it to pull, or to clone a fresh
+# copy on a machine that installed from a downloaded archive and therefore has
+# no checkout to pull into.
+REPO_URL="https://github.com/AgentTooligans/AgentTools"
 
 BIN="$HOME/.local/bin"
-AM="$HOME/.agentmemory"
+# Where a pre-3.3.0 agentmemory install left its store. We no longer install,
+# supervise or update agentmemory, but `doctor` still looks here so an old
+# install that is still capturing gets reported instead of silently fighting
+# claude-mem for the same transcripts.
+AM_LEGACY="$HOME/.agentmemory"
 
 c_ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 c_bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; }
@@ -52,7 +67,7 @@ first_nonflag() {
 # Installing through them puts packages in the WINDOWS npm prefix
 # (/mnt/c/Users/<you>/AppData/Roaming/npm) and any Linux service pointed at the
 # result FAILS while every check still looks green. Observed on real WSL2
-# 2026-07-29: agentmemory "installed" to /mnt/c/... and its systemd unit died.
+# 2026-07-29: a memory server "installed" to /mnt/c/... and its unit died.
 # So inside WSL a Windows-hosted binary counts as NOT INSTALLED.
 have_native() {
     local p; p="$(command -v "$1" 2>/dev/null)" || return 1
@@ -79,18 +94,21 @@ ASSUME_YES=0
 NO_INSTALL=0
 
 # ---------------------------------------------------------------------------
-# Memory backend. Two tools do this job and they must not both be active:
-# each hooks the session lifecycle, so running both means double capture and
-# double per-tool-call overhead.
+# Memory backend. One tool does this job now.
 #
 #   claude-mem   default. Runs a worker on :37701 (start with `npx claude-mem
 #                start` — no launchd/systemd unit needed, and no cwd trap),
-#                injects context at session start, ~3.4x the adoption. No bulk
-#                importer: it starts from install day. Ships /learn-codebase to
-#                ingest a repo.
-#   agentmemory  opt-in. Needs a supervised server whose WORKING DIRECTORY
-#                decides the store location, but has `import-jsonl` to rebuild
-#                from past transcripts.
+#                injects context at session start. No bulk importer: it starts
+#                from install day. Ships /learn-codebase to ingest a repo.
+#   none         graphify only, nothing captures sessions.
+#
+# REMOVED IN 3.3.0: agentmemory. It was the only thing here that needed a
+# supervised server, and the working-directory-decides-the-store trap behind it
+# produced most of this file's scar tissue: a launchd plist, a systemd unit, a
+# cwd-sensitive start command, and a native-Windows blocker. Existing installs
+# are NOT deleted — `doctor` still reports one that is still capturing, and
+# scripts/agentmemory-to-claude-mem.py still migrates the store. See
+# `agent-tools memory migrate-from-agentmemory`.
 #
 # Resolution order: --memory flag > saved choice > default.
 # ---------------------------------------------------------------------------
@@ -110,11 +128,37 @@ FORCE_IMPORT=0
 SKIP_RTK=0
 SKIP_SUPERPOWERS=0
 SKIP_CONTEXT_MODE=0
+SKIP_POCOCK=0
 # --project: install/activate for THIS REPO only, never machine-wide. Binaries
 # are still shared (a uv tool or a brew formula has no per-project form) --
 # what changes is where the ACTIVATION lands: repo .claude/settings.json,
 # project-scope plugins, `-s local` MCP entries.
 SCOPE_PROJECT=0
+# uninstall data handling: neither set = ask; --purge = delete without asking;
+# --keep-data = never delete. Both set is a contradiction, resolved in favour
+# of keeping, because the destructive reading of an ambiguous command is the
+# wrong one to guess.
+PURGE_DATA=0
+# --purge alone covers MACHINE-WIDE data only. Per-repo data (a repo's
+# graphify-out/, its parsed indexes) needs --purge-repo on top, because those
+# paths depend on where you are standing when you type the command -- and a
+# --purge run from inside the wrong repo is how this project lost a graph.
+PURGE_REPO=0
+KEEP_DATA=0
+SHORT_OUTPUT=0
+# MCP is OPT-IN as of 3.4.0. `init` wires no server unless you ask for one.
+#
+# WHY THE DEFAULT FLIPPED
+#   An MCP server re-sends its whole tool schema EVERY session whether or not
+#   it is called -- graphify's is ~1.5k tokens. The CLI answers the same
+#   questions from the same graph.json for zero standing cost, and works in
+#   every agent rather than Claude Code alone. Paying a per-session tax by
+#   default, for a capability most repos use occasionally, is the exact tax
+#   this project exists to avoid.
+#
+#   `--add-mcp` opts a repo in. `--no-mcp` is still accepted and is now a no-op
+#   naming the default, because it was the documented spelling before 3.4.0.
+ADD_MCP=0
 for _a in "$@"; do
     case "$_a" in
         --memory=*) MEMORY_BACKEND="${_a#--memory=}" ;;
@@ -122,8 +166,15 @@ for _a in "$@"; do
         --no-rtk) SKIP_RTK=1 ;;
         --no-superpowers) SKIP_SUPERPOWERS=1 ;;
         --no-context-mode) SKIP_CONTEXT_MODE=1 ;;
+        --no-pocock) SKIP_POCOCK=1 ;;
         --project|--local) SCOPE_PROJECT=1 ;;
         --force) FORCE_IMPORT=1 ;;
+        --purge) PURGE_DATA=1 ;;
+        --purge-repo) PURGE_DATA=1; PURGE_REPO=1 ;;
+        --keep-data) KEEP_DATA=1 ;;
+        --short) SHORT_OUTPUT=1 ;;
+        --add-mcp|--mcp) ADD_MCP=1 ;;
+        --no-mcp|--cli) ADD_MCP=0 ;;
     esac
 done
 if [ -z "$MEMORY_BACKEND" ] && [ -f "$AT_CONFIG" ]; then
@@ -131,9 +182,33 @@ if [ -z "$MEMORY_BACKEND" ] && [ -f "$AT_CONFIG" ]; then
 fi
 MEMORY_BACKEND="${MEMORY_BACKEND:-$MEMORY_DEFAULT}"
 case "$MEMORY_BACKEND" in
-    claude-mem|agentmemory|none) ;;
-    *) printf '  unknown --memory value: %s (use claude-mem | agentmemory | none)\n' "$MEMORY_BACKEND"; exit 2 ;;
+    claude-mem|none) ;;
+    # A config file written before 3.3.0 can still say agentmemory. Do not hard
+    # fail on it -- that would break `doctor` on exactly the machine that most
+    # needs to run it. Fall back to the default and say so once.
+    agentmemory)
+        printf '  memory backend "agentmemory" was removed in 3.3.0 — using %s\n' "$MEMORY_DEFAULT"
+        printf '  your old store is untouched: agent-tools memory migrate-from-agentmemory\n'
+        MEMORY_BACKEND="$MEMORY_DEFAULT" ;;
+    *) printf '  unknown --memory value: %s (use claude-mem | none)\n' "$MEMORY_BACKEND"; exit 2 ;;
 esac
+# Where the git checkout lives. install.sh copies the script to ~/.local/bin,
+# so $0 at runtime is the COPY and knows nothing about its source -- which made
+# `update self` always fall through to "not running from a git checkout" on
+# every properly installed machine. install.sh records the path here.
+remember_source() {
+    mkdir -p "$AT_CONFIG_DIR" 2>/dev/null
+    if [ -f "$AT_CONFIG" ]; then
+        grep -v '^source_checkout=' "$AT_CONFIG" > "$AT_CONFIG.tmp" 2>/dev/null || true
+        mv "$AT_CONFIG.tmp" "$AT_CONFIG" 2>/dev/null
+    fi
+    printf 'source_checkout=%s\n' "$1" >> "$AT_CONFIG"
+}
+recorded_source() {
+    [ -f "$AT_CONFIG" ] || return 1
+    sed -n 's/^source_checkout=//p' "$AT_CONFIG" 2>/dev/null | tail -1
+}
+
 remember_backend() {
     mkdir -p "$AT_CONFIG_DIR" 2>/dev/null
     if [ -f "$AT_CONFIG" ]; then
@@ -143,17 +218,19 @@ remember_backend() {
     printf 'memory_backend=%s\n' "$1" >> "$AT_CONFIG"
 }
 
-# Detect either backend regardless of which is selected, so we can warn when
-# both are present (the user asked for a loud warning, not a hard block).
 cm_installed() { have claude-mem || [ -d "$HOME/.claude-mem" ]; }
-am_installed() { have agentmemory || [ -d "$AM/data" ]; }
+# We no longer install agentmemory, but a machine upgraded from <3.3.0 can
+# still have one running. Keep detecting it: two capturing backends means
+# double capture and double per-tool-call overhead, and the user deserves to
+# be told which one to stop.
+am_legacy_installed() { have agentmemory || [ -d "$AM_LEGACY/data" ]; }
 
 # INSTALLED is not the problem — ACTIVE is. A backend that is present but has
 # its hooks disabled and its service stopped costs nothing and is a useful
 # archive. Only two *capturing* backends duplicate work. Warning on mere
 # presence cries wolf at exactly the person who did the right thing.
 cm_active() { curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; }
-am_active() {
+am_legacy_active() {
     curl -sf -m 3 http://localhost:3111/agentmemory/health >/dev/null 2>&1 && return 0
     # Plugin enabled (not merely installed) also means hooks fire.
     have claude || return 1
@@ -298,32 +375,49 @@ _pick_python() {
 }
 PY="$(_pick_python)"
 
-SERVICE_LABEL="com.agentmemory.server"
-PLIST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT="$UNIT_DIR/agentmemory.service"
+# Service definitions a pre-3.3.0 agent-tools may have written. Nothing here
+# creates them any more; they exist so `memory migrate-from-agentmemory` can
+# find and disable one that is still running.
+AM_LEGACY_LABEL="com.agentmemory.server"
+AM_LEGACY_PLIST="$HOME/Library/LaunchAgents/$AM_LEGACY_LABEL.plist"
+AM_LEGACY_UNIT_DIR="$HOME/.config/systemd/user"
+AM_LEGACY_UNIT="$AM_LEGACY_UNIT_DIR/agentmemory.service"
 
 # ---------------------------------------------------------------------------
 usage() {
 cat <<'USAGE'
-agent-tools — graphify + agentmemory, set up correctly, on any project.
+agent-tools — graphify + claude-mem, set up correctly, on any project.
 
   agent-tools doctor            report only; changes nothing
   agent-tools install-machine   once per computer
-  agent-tools init              once per project (run from inside the repo)
+  agent-tools init              once per project (run from inside the repo).
+                                Wires NO MCP server: the agent uses the CLI,
+                                which costs 0 tokens per session and works in
+                                every agent, not just Claude Code
+  agent-tools init --add-mcp    same, plus graphify's MCP server for THIS repo
+                                (~1.5k tokens every session, Claude Code only)
+  agent-tools agents            which agents are installed, and how each one
+                                gets these tools without an MCP server
   agent-tools refresh           refresh this project's graph, in the right order
-  agent-tools status            is a refresh running here? how far along?
+  agent-tools status            what is installed, what is not, and versions
+  agent-tools status refresh    is a refresh running here? how far along?
+  agent-tools version           version, release date, and when it was installed
   agent-tools stop              stop a run in THIS repo (other projects untouched)
   agent-tools memory status     which backend, what is installed
   agent-tools memory export     memories -> portable Markdown (Obsidian-ready)
-  agent-tools memory switch X   change backend machine-wide (claude-mem|agentmemory)
+  agent-tools memory switch X   change backend machine-wide (claude-mem|none)
+  agent-tools memory migrate-from-agentmemory
+                                one-time: pull a pre-3.3.0 agentmemory store
+                                into claude-mem and retire its service
   agent-tools obsidian DIR      export graph + memories into an Obsidian vault
   agent-tools tools             every optional tool: installed? wired? overlapping?
   agent-tools install NAME      install one tool (or: defaults | all)
-  agent-tools uninstall NAME    remove one tool
+  agent-tools uninstall NAME    remove one tool (or: all) — asks before
+                                deleting anything it recorded
   agent-tools wire NAME         add a tool's MCP to THIS project (crg|token-savior)
   agent-tools unwire NAME       remove it from this project
   agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
+  agent-tools pocock [CMD]      grill-me/handoff/wait-what: status|install|update|uninstall
   agent-tools update [WHAT]     update one thing, or everything installed
   agent-tools migrate export    archive what git cannot carry (memory, keys, ~/.claude)
   agent-tools migrate import F  restore that archive on a new computer
@@ -335,18 +429,78 @@ Tools (agent-tools install <name>):
     superpowers    skills library (TDD, debugging, planning)
     context-mode   sandboxes tool output, survives compaction (Node >= 22.5)
     caveman        compresses what the agent SAYS BACK
+    pocock         4 skills: /grill-me, /handoff, /wait-what (+ grilling)
   opt-in (they duplicate graphify and each other — docs/TOOLS.md):
     code-review-graph   second code graph, 30 MCP tools
     token-savior        third code graph + its own memory engine
 
-  agent-tools update all        graphify + memory + every installed tool + self
-  agent-tools update tools      only the optional tools
-  agent-tools update graphify   just that one (same for rtk, caveman, ...)
+Versions (see docs/UPDATING.md):
+  agent-tools version           the full picture: released / installed / source
+  agent-tools version --short   just the number, for scripts
+  agent-tools status            every managed tool with its version, plus what
+                                is available but not installed
+  ./install.sh --version        what a checkout would install, without doing it
+  A version has three dates and they can all differ: RELEASED is baked into
+  the file, INSTALLED is when install.sh last wrote your PATH copy, SOURCE is
+  the checkout's HEAD. `version` prints all three and warns when they diverge.
+
+Removing (see docs/UPDATING.md):
+  agent-tools uninstall NAME    one tool, plugin, skill pack or MCP server
+  agent-tools uninstall all     everything agent-tools installed, after showing
+                                the full list and taking a typed confirmation
+  Data is a SEPARATE decision from the tool. Anything a tool recorded is named,
+  sized and labelled regenerable-or-not before you are asked, and the default
+  answer is NO:
+  --purge         delete each tool's MACHINE-WIDE data without asking
+  --purge-repo    additionally include THIS repo's data (graphify-out/ and the
+                  per-repo indexes). Separate flag on purpose: which repo that
+                  means depends on where you are standing, so --purge alone
+                  never deletes it. Rows marked [THIS REPO] need this.
+  --keep-data     keep all of it without asking
+  Unregenerable stores, called out by name: rtk's history.db (your savings
+  record), context-mode's index, token-savior's recall store, claude-mem's
+  captured sessions, and graphify's config. A repo's graphify-out/ and the
+  per-repo graphs ARE regenerable, but a deep semantic re-run costs hours.
+
+Updating (see docs/UPDATING.md):
+  agent-tools update all        graphify + claude-mem + every installed tool + self
+  agent-tools update tools      only the optional tools (skips graphify/memory/self)
+  agent-tools update memory     just claude-mem, and restart its worker
+  agent-tools update pocock     just the mattpocock skills
+  agent-tools update graphify   just that one (same for rtk, caveman, pocock,
+                                superpowers, context-mode, code-review-graph,
+                                token-savior, self)
+  Nothing is INSTALLED by an update: a tool you do not have is reported, not
+  added.
+
+MCP servers (per repo, opt-in since 3.4.0):
+  agent-tools init              no server. The agent uses the CLI.
+  agent-tools init --add-mcp    add graphify's server to THIS repo
+  agent-tools wire NAME         add one later (graphify|crg|token-savior)
+  agent-tools unwire NAME       take it back out; the CLI keeps working
+
+  PRO of an MCP server: the agent SEES the tools in every session and reaches
+  for them unprompted. No instruction file has to teach it. For a graph you
+  query constantly, that is worth paying for.
+  CON: it re-sends its whole schema EVERY session whether you call it or not
+  (graphify ~1.5k tokens; code-review-graph ships 30 tools), it only works in
+  Claude Code, and stacking two or three of them multiplies the tax to answer
+  questions you ask one of them.
+
+  Same binary either way. `uv tool install graphifyy` puts BOTH `graphify`
+  (CLI) and `graphify-mcp` (server) on disk, reading the same graph.json, so
+  wiring installs nothing and unwiring removes nothing. It is reversible on any
+  repo at any time.
+
+  Re-running `init` on a repo that already has a server LEAVES IT ALONE.
 
 Scope:
   --project       install/activate for THIS REPO only. Binaries are still
                   shared (brew/uv/npm have no per-project form); what changes
                   is where the hook, plugin and MCP entries land.
+                  Does NOT apply to the skill packs (caveman, pocock): skills
+                  live in ~/.agents/skills, one copy for every repo and every
+                  agent, so those install machine-wide whatever you pass.
 
 Flags (refresh):
   --code-only     AST only, zero LLM, ~1 min
@@ -359,21 +513,23 @@ Flags (refresh):
 
 Memory backend (install-machine):
   --memory=claude-mem   default. light worker on :37701, context injection
-  --memory=agentmemory  supervised server, has a bulk transcript importer
-  --memory=none         graphify only
+  --memory=none         graphify only, nothing captures sessions
   Your choice is remembered in ~/.config/agent-tools/config.
+  (--memory=agentmemory was removed in 3.3.0. A config that still names it
+   falls back to claude-mem with a notice; the old store is left alone.)
 
 Flags (install-machine):
   --no-caveman          skip the caveman output-compression skill
   --no-rtk              skip rtk and its Bash hook
   --no-superpowers      skip the superpowers skills library
   --no-context-mode     skip context-mode (also skipped on Node < 22.5)
+  --no-pocock           skip the mattpocock skill pack
   -y, --yes       install everything missing without asking (CI / unattended)
       --no-install  never install; just report what is missing
   default         ask before each install; skips (never hangs) when
                   non-interactive
 
-Platforms: macOS · Linux · WSL2 = full.  Native Windows = graphify only.
+Platforms: macOS · Linux · WSL2 = full.  Native Windows = no rtk (see help).
 
 New machine:   agent-tools install-machine
 New project:   cd ~/code/myrepo && agent-tools init
@@ -385,16 +541,20 @@ long_help() {
 cat <<'HELP'
 PLATFORMS
 
-  macOS    launchd user agent (~/Library/LaunchAgents)
-  Linux    systemd --user unit (~/.config/systemd/user), `loginctl enable-linger`
-           recommended so the memory server survives logout
-  WSL2     same as Linux when systemd is enabled (systemd=true in /etc/wsl.conf,
-           then `wsl --shutdown`). Without systemd there is no supervisor, so
-           the server must be started manually — `agent-tools doctor` says so.
-  Windows  graphify works (pure Python). agentmemory does NOT install cleanly:
-           upstream ships no PowerShell/scoop/winget installer for its engine,
-           and `agentmemory connect` is unsupported on native Windows. Use WSL2.
-           Exception: `agentmemory connect copilot-cli` is Windows-safe.
+  macOS    full. Nothing to supervise — claude-mem runs its own worker.
+  Linux    full. No systemd unit is written any more; `loginctl enable-linger`
+           is no longer needed for memory.
+  WSL2     full, with or without systemd. Before 3.3.0 a systemd-less WSL had
+           no way to supervise the memory server; that server is gone.
+  Windows  graphify, claude-mem, superpowers, context-mode and the skill packs
+           all work. rtk is the gap: no scoop/winget package, so you need Rust
+           (`cargo install --git`) or the release zip on PATH. WSL2 remains the
+           smoother route, but is no longer required.
+
+           HISTORICAL: releases before 3.3.0 said "Windows = graphify only".
+           That was an agentmemory limitation (no engine installer, and
+           `agentmemory connect` unsupported there). Removing that backend
+           removed the blocker.
 
 THE THREE TIERS
 
@@ -440,19 +600,24 @@ graphify
   * Hooks must call bare `graphify`, never an absolute path, or they break on
     the next machine.
 
-agentmemory
-  * LAW: the store path is CWD-RELATIVE (v0.9.28: ./data/state_store.db).
-    AGENTMEMORY_DATA_DIR and --data-dir are documented but INERT (both tested).
-    The service's working directory is the only thing keeping one store. Start
-    it somewhere else and you silently get a new, empty one.
-  * LAW: `--tools core` must be a server ARGUMENT. Neither ~/.agentmemory/.env
+agentmemory  (REMOVED 3.3.0 — kept here because the reasons are the removal)
+  * LAW: the store path was CWD-RELATIVE (v0.9.28: ./data/state_store.db).
+    AGENTMEMORY_DATA_DIR and --data-dir were documented but INERT (both tested).
+    A service's working directory was the only thing keeping one store. Start
+    it somewhere else and you silently got a new, empty one. That single fact
+    is why this script used to ship a launchd plist and a systemd unit.
+  * LAW: `--tools core` had to be a server ARGUMENT. Neither ~/.agentmemory/.env
     nor the MCP shim's environment honored AGENTMEMORY_TOOLS. As an argument it
-    cuts 53 tools (~5,918 tokens of schema per session) down to 8 (~995).
-  * Stop the server before copying store files, or the live engine overwrites
-    the session index mid-copy. Store files are JSON + an 8-byte hash/length
-    footer; hand-edit them and the engine rejects the file.
-  * Never run memory_heal on a freshly restored store — restored observations
+    cut 53 tools (~5,918 tokens of schema per session) down to 8 (~995).
+  * It had no native-Windows engine installer and `agentmemory connect` was
+    unsupported there, which is what pinned this whole script to "Windows =
+    graphify only" for three minor versions.
+  * If you still have a store: stop the server before copying its files, or the
+    live engine overwrites the session index mid-copy. Store files are JSON + an
+    8-byte hash/length footer; hand-edit them and the engine rejects the file.
+    Never run memory_heal on a freshly restored store — restored observations
     look exactly like the "orphaned" data it deletes.
+    `agent-tools memory migrate-from-agentmemory` does all of this correctly.
 
 rtk  (observed 2026-08-04)
   * There are TWO different tools called rtk. crates.io ships an unrelated
@@ -468,7 +633,7 @@ rtk  (observed 2026-08-04)
     hooks in the same file.
 
 context-mode
-  * Needs Node >= 22.5, one major above agentmemory's floor. On older Node it
+  * Needs Node >= 22.5, two majors above this script's floor. On older Node it
     installs fine and every hook then fails at RUNTIME, which reads as a broken
     session rather than a version problem. install-machine checks first.
   * Its session/content store is ~/.claude/context-mode -- that is the
@@ -529,11 +694,12 @@ as_root() {
     return 126                                   # 126 = needs password, no tty
 }
 
-# agentmemory declares engines: node >=20. npm only WARNS about that, so it
-# installs happily on Node 18 and then crash-loops with "does not provide an
-# export named 'styleText'" (node:util gained styleText in 20.12). Ubuntu 24.04
-# — the most common WSL LTS — ships Node 18.19, so this is not a corner case.
-# Observed on a pristine Ubuntu 24.04 WSL2 distro 2026-07-29.
+# Node floor. npm only WARNS about an unmet `engines` field, so a too-old Node
+# installs happily and then crash-loops at runtime — the failure mode observed
+# on Node 18: "does not provide an export named 'styleText'" (node:util gained
+# styleText in 20.12). Ubuntu 24.04 — the most common WSL LTS — ships Node
+# 18.19, so this is not a corner case. Observed on a pristine Ubuntu 24.04 WSL2
+# distro 2026-07-29. claude-mem and the npm-based tools share this floor.
 NODE_MIN=20
 node_major() { node -v 2>/dev/null | sed 's/^v//; s/[.].*//'; }
 node_ok() { have_native node && [ "$(node_major)" -ge "$NODE_MIN" ] 2>/dev/null; }
@@ -586,110 +752,22 @@ install_uv() {
 }
 
 # ---------------------------------------------------------------------------
-# Service management, per platform. Each returns non-zero if unsupported.
+# NO SERVICE MANAGEMENT LIVES HERE ANY MORE.
+#
+# Until 3.3.0 this section built a launchd plist and a systemd --user unit to
+# supervise the agentmemory server, because that server stored data relative to
+# its WORKING DIRECTORY -- start it from the wrong cwd and you got a silently
+# empty store. Two LAWs were encoded in those unit files to survive it.
+#
+# claude-mem has neither problem: `npx claude-mem start` owns its own worker on
+# :37701 and its store path is absolute. So the plist, the unit, the linger
+# call, the cwd pinning and the --tools core argument are all gone. If you are
+# looking for why a memory server is not running, the answer is now one command
+# (`npx claude-mem start`), not a supervisor.
+#
+# `agent-tools memory migrate-from-agentmemory` cleans up units left behind by
+# an older install.
 # ---------------------------------------------------------------------------
-svc_install() {
-    local ambin; ambin="$(command -v agentmemory || echo "$BIN/agentmemory")"
-    mkdir -p "$AM/logs"
-    case "$PLATFORM" in
-    macos)
-        mkdir -p "$HOME/Library/LaunchAgents"
-        cat > "$PLIST" <<PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$SERVICE_LABEL</string>
-  <!-- LAW: --tools core must be an ARGUMENT (env/.env are ignored). 53->8 tools. -->
-  <key>ProgramArguments</key>
-  <array><string>$ambin</string><string>--tools</string><string>core</string></array>
-  <!-- LAW: the store path is cwd-relative. Change this and you get an empty store. -->
-  <key>WorkingDirectory</key><string>$AM</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>HOME</key><string>$HOME</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>$AM/logs/server.out.log</string>
-  <key>StandardErrorPath</key><string>$AM/logs/server.err.log</string>
-  <key>ProcessType</key><string>Background</string>
-</dict>
-</plist>
-PLISTEOF
-        launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null
-        launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null
-        return 0 ;;
-    linux|wsl)
-        if ! has_systemd; then return 2; fi   # 2 = no supervisor available
-        mkdir -p "$UNIT_DIR"
-        cat > "$UNIT" <<UNITEOF
-[Unit]
-Description=agentmemory server
-After=network.target
-
-[Service]
-Type=simple
-# LAW: --tools core must be an ARGUMENT (env and .env are ignored). 53->8 tools.
-ExecStart=$ambin --tools core
-# LAW: the store path is cwd-relative. Change this and you get an empty store.
-WorkingDirectory=$AM
-Environment=PATH=$BIN:/usr/local/bin:/usr/bin:/bin
-Environment=HOME=$HOME
-Restart=on-failure
-StandardOutput=append:$AM/logs/server.out.log
-StandardError=append:$AM/logs/server.err.log
-
-[Install]
-WantedBy=default.target
-UNITEOF
-        systemctl --user daemon-reload 2>/dev/null
-        systemctl --user enable --now agentmemory.service 2>/dev/null
-        # Without lingering the service dies at logout on most distros.
-        have loginctl && loginctl enable-linger "$(id -un)" 2>/dev/null
-        return 0 ;;
-    windows) return 3 ;;                       # 3 = platform unsupported
-    *) return 3 ;;
-    esac
-}
-
-svc_stop() {
-    case "$PLATFORM" in
-        macos) launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null ;;
-        linux|wsl) has_systemd && systemctl --user stop agentmemory.service 2>/dev/null ;;
-    esac
-    ( cd "$AM" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
-}
-
-svc_start() {
-    case "$PLATFORM" in
-        macos) launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null ;;
-        linux|wsl) has_systemd && systemctl --user start agentmemory.service 2>/dev/null ;;
-    esac
-}
-
-svc_describe() {
-    case "$PLATFORM" in
-        macos) echo "launchd: $PLIST" ;;
-        linux|wsl) has_systemd && echo "systemd --user: $UNIT" || echo "no supervisor (start manually)" ;;
-        windows) echo "unsupported on native Windows — use WSL2" ;;
-    esac
-}
-
-# Verify the service definition still encodes both LAWs, whatever the platform.
-svc_check() {
-    local f=""
-    case "$PLATFORM" in
-        macos) f="$PLIST" ;;
-        linux|wsl) f="$UNIT" ;;
-        *) c_warn "no service on this platform ($PLATFORM)"; return ;;
-    esac
-    if [ ! -f "$f" ]; then c_warn "no service installed (server won't start at login)"; return; fi
-    grep -q "$AM" "$f" && c_ok "LAW: working directory pinned to $AM" \
-        || c_bad "LAW VIOLATED: working directory is not $AM — you will get an empty store"
-    grep -q "core" "$f" && c_ok "--tools core (8 tools, ~995 tokens)" \
-        || c_warn "--tools core not set: 53 tools ~= 5,918 tokens per session"
-}
 
 # ---------------------------------------------------------------------------
 graph_stats() {
@@ -708,16 +786,14 @@ doctor() {
     case "$PLATFORM" in
         macos) c_ok "macOS — full support" ;;
         linux) c_ok "Linux — full support" ;;
-        wsl)   has_systemd && c_ok "WSL2 with systemd — full support" \
-                || c_warn "WSL without systemd: no supervisor. Enable it (systemd=true in /etc/wsl.conf, then 'wsl --shutdown'), or start the server manually." ;;
-        windows) c_warn "native Windows — graphify only; agentmemory needs WSL2 (upstream limitation)" ;;
+        wsl)   c_ok "WSL2 — full support" ;;
+        windows) c_warn "native Windows — everything but rtk works; rtk needs Rust or the release zip" ;;
         *) c_warn "unrecognized platform: $(uname -s)" ;;
     esac
-    echo "  service: $(svc_describe)"
 
     hdr "Machine"
     if node_ok; then c_ok "node $(node -v)"
-    elif have_native node; then c_bad "node $(node -v) too old — agentmemory needs >= $NODE_MIN (crash-loops on 18)"
+    elif have_native node; then c_bad "node $(node -v) too old — need >= $NODE_MIN (crash-loops on 18)"
     elif have node; then c_bad "node is the WINDOWS one ($(where_is node)) — install Node inside WSL"
     else c_bad "node missing — run: agent-tools install-machine"; fi
     have uv   && c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')" || c_bad "uv missing"
@@ -733,31 +809,27 @@ doctor() {
             c_warn "graphify-mcp unavailable — fix: uv tool install \"graphifyy[gemini,mcp]\" --with \"mcp<2\" --force"
         fi
     else c_bad "graphify missing"; fi
-    if [ "$PLATFORM" = windows ]; then
-        c_warn "agentmemory skipped on native Windows (use WSL2)"
-    else
-        if have_native agentmemory; then c_ok "agentmemory $(agentmemory --version 2>/dev/null | head -1)"
-        elif have agentmemory; then c_bad "agentmemory resolves to a WINDOWS binary: $(where_is agentmemory) — install it inside WSL"
-        else c_bad "agentmemory missing"; fi
-        if [ "$PLATFORM" = wsl ] && have npm && ! have_native npm; then
-            c_bad "npm is the WINDOWS one ($(where_is npm)) — 'sudo apt-get install -y nodejs npm' inside WSL"
-        fi
+    if [ "$PLATFORM" = wsl ] && have npm && ! have_native npm; then
+        c_bad "npm is the WINDOWS one ($(where_is npm)) — 'sudo apt-get install -y nodejs npm' inside WSL"
     fi
 
     hdr "Memory backend: $MEMORY_BACKEND"
-    if cm_active && am_active; then
-        c_bad "BOTH backends are ACTIVELY CAPTURING."
-        c_bad "Every tool call fires two hook sets into two stores — double"
-        c_bad "overhead and duplicated memory."
-        c_warn "Stop one:"
-        c_warn "    claude plugin disable agentmemory@agentmemory --scope local"
-        c_warn "    (or)  npx claude-mem stop"
-    elif cm_installed && am_installed; then
-        # Both present, one inert. That is a legitimate setup: the inactive one
-        # is an archive you can still consult by re-enabling it.
-        if cm_active; then c_ok "agentmemory installed but INACTIVE (archive) — no conflict"
-        elif am_active; then c_ok "claude-mem installed but INACTIVE — no conflict"
-        else c_warn "both installed, neither active"; fi
+    # agent-tools has not installed agentmemory since 3.3.0, but an upgraded
+    # machine can still be running one. Two capturing backends means every tool
+    # call fires two hook sets into two stores.
+    if am_legacy_active; then
+        if cm_active; then
+            c_bad "A LEGACY agentmemory is STILL CAPTURING alongside claude-mem."
+            c_bad "Double hook overhead on every tool call, duplicated memory."
+            c_warn "Retire it (keeps the data, migrates it into claude-mem):"
+            c_warn "    agent-tools memory migrate-from-agentmemory"
+        else
+            c_warn "a legacy agentmemory is running; agent-tools no longer manages it"
+            c_warn "    agent-tools memory migrate-from-agentmemory"
+        fi
+    elif am_legacy_installed; then
+        c_ok "legacy agentmemory present but INACTIVE (archive) — no conflict"
+        echo "        migrate it when convenient: agent-tools memory migrate-from-agentmemory"
     fi
     case "$MEMORY_BACKEND" in
       claude-mem)
@@ -765,7 +837,7 @@ doctor() {
         [ -d "$HOME/.claude-mem" ] && c_ok "store: ~/.claude-mem" || c_warn "no store yet at ~/.claude-mem"
         # Correction (2026-07-29): the installer says "Worker autostart skipped
         # — start it manually with npx claude-mem start", so a worker IS wanted.
-        # It is lighter than agentmemory's supervised server, but not nothing.
+        # It needs no supervisor, but it does need to be running.
         if curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; then
             c_ok "worker responding on :37701"
         else
@@ -779,8 +851,6 @@ doctor() {
         c_warn "backend not recorded — inheriting the default '$MEMORY_DEFAULT'"
         c_warn "    run 'agent-tools init' in any project to pin it"
     fi
-    case x in x) ;;
-    esac
 
     hdr "caveman (output compression)"
     if caveman_installed; then
@@ -800,21 +870,10 @@ doctor() {
 
     hdr "Optional tools"
     local _t
-    for _t in rtk superpowers context-mode code-review-graph token-savior; do
+    for _t in rtk superpowers context-mode pocock code-review-graph token-savior; do
         tool_status_line "$_t"
     done
     tools_overlap_warnings
-
-    if [ "$MEMORY_BACKEND" = agentmemory ] && [ "$PLATFORM" != windows ]; then
-        hdr "Memory server"
-        if curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
-            c_ok "responding on :3111"
-        else c_bad "not responding on :3111"; fi
-        svc_check
-        if [ -f "$AM/bin/iii" ] && have file && ! file "$AM/bin/iii" 2>/dev/null | grep -qE "Mach-O|ELF"; then
-            c_bad "iii engine binary looks foreign — delete it, it re-downloads"
-        fi
-    fi
 
     hdr "Instruction file hygiene"
     # An instruction file is read into context EVERY session, so its size is a
@@ -866,21 +925,21 @@ doctor() {
             && c_ok "post-checkout hook installed (branch switches)" \
             || c_warn "no post-checkout hook — re-run: agent-tools init"
         if have claude; then
-            claude mcp list 2>/dev/null | grep -q "^graphify" && c_ok "graphify MCP wired" || c_warn "graphify MCP not wired"
-            # Only agentmemory needs an MCP entry of ours. claude-mem registers
-            # its own, so "agentmemory MCP not wired" under claude-mem is the
-            # CORRECT state -- reporting it as a warning trains people to ignore
-            # doctor output.
-            case "$MEMORY_BACKEND" in
-              agentmemory)
-                claude mcp list 2>/dev/null | grep -q "^agentmemory" \
-                    && c_ok "agentmemory MCP wired" || c_warn "agentmemory MCP not wired" ;;
-              claude-mem)
+            # Not wired is the DEFAULT since 3.4.0, not a fault: the CLI
+            # answers the same questions for no per-session cost.
+            claude mcp list 2>/dev/null | grep -q "^graphify" \
+                && c_ok "graphify MCP wired (~1.5k tokens every session)" \
+                || c_ok "graphify MCP not wired — CLI mode (default, 0 tokens)"
+            # claude-mem registers its own MCP entry, so there is nothing for
+            # us to wire. The only thing worth reporting is a leftover entry
+            # from the agentmemory era, which now points at a server nothing
+            # starts.
+            if [ "$MEMORY_BACKEND" = claude-mem ]; then
                 if claude mcp list 2>/dev/null | grep -q "^agentmemory"; then
-                    c_warn "stale agentmemory MCP entry (backend is claude-mem)"
+                    c_warn "stale agentmemory MCP entry (removed backend, dead server)"
                     echo "        claude mcp remove agentmemory -s local"
-                else c_ok "memory MCP: claude-mem registers its own"; fi ;;
-            esac
+                else c_ok "memory MCP: claude-mem registers its own"; fi
+            fi
         fi
     else c_warn "not a git repository"; fi
 }
@@ -947,7 +1006,9 @@ install_caveman() {
 
     # Global, cross-agent. Eve and PromptScript reject global scope by design;
     # that is their limitation and not an error worth surfacing.
-    ( cd "$neutral" && npx -y skills add "$CAVEMAN_REPO" --skill '*' --agent '*' -g -y >/dev/null 2>&1 ) \
+    # skills_copy_flag prints an empty string or --copy; splitting is the point.
+    # shellcheck disable=SC2046
+    ( cd "$neutral" && npx -y skills add "$CAVEMAN_REPO" --skill '*' --agent '*' -g -y $(skills_copy_flag) >/dev/null 2>&1 ) \
         && c_ok "caveman skills installed globally (~/.agents/skills, all agents)" \
         || c_warn "global skill install failed — run: npx -y skills add $CAVEMAN_REPO --all -g"
     [ -d "$neutral" ] && rm -rf "$neutral" 2>/dev/null
@@ -969,7 +1030,11 @@ caveman_cmd() {
                 local lvl; lvl="$(caveman_level)"
                 c_ok "caveman installed${lvl:+ — ACTIVE at level '$lvl'}"
                 [ -z "$lvl" ] && c_ok "currently off"
-                [ -d "$HOME/.agents/skills/caveman" ] && c_ok "global skills: $(ls "$HOME/.agents/skills" 2>/dev/null | grep -c caveman) present"
+                if [ -d "$HOME/.agents/skills/caveman" ]; then
+                    local _n=0 _d
+                    for _d in "$HOME"/.agents/skills/*caveman*; do [ -e "$_d" ] && _n=$((_n+1)); done
+                    c_ok "global skills: $_n present"
+                fi
                 echo
                 echo "  In a session:  /caveman [lite|full|ultra|wenyan]   ·   /caveman off"
                 echo "  Savings:       /caveman-stats  (upstream's estimate, not measured here)"
@@ -1012,6 +1077,11 @@ caveman_cmd() {
 #                  nothing until a skill is invoked.
 #   context-mode   DEFAULT. MCP server + hooks: sandboxes tool output, keeps
 #                  session state across compaction. Needs Node >= 22.5.
+#   pocock         DEFAULT. Four skills from mattpocock/skills, installed
+#                  globally so every agent gets them, not just Claude Code.
+#                  NOT an MCP server: a skill is a markdown file, so the only
+#                  standing cost is its `description` line in the skill index
+#                  (~100 tokens for all four). Bodies load on invocation.
 #   code-review-graph  OPT-IN. Second code knowledge graph, 30 MCP tools.
 #   token-savior       OPT-IN. Third code graph + its own memory engine.
 #
@@ -1058,8 +1128,41 @@ TS_PKG="token-savior-recall"
 # silently degrades to keyword-only recall.
 TS_EXTRAS="token-savior-recall[mcp,memory-vector]"
 
-OPTIONAL_TOOLS="rtk superpowers context-mode caveman code-review-graph token-savior"
-DEFAULT_TOOLS="rtk superpowers context-mode caveman"
+# ---------------------------------------------------------------------------
+# pocock — https://github.com/mattpocock/skills
+#
+# WHICH FOUR, AND WHY NOT THE OTHER 31
+#   The repo ships 35 skills. We install the four that are useful in ANY repo
+#   and carry no house style with them. The rest (tdd, code-review, to-spec,
+#   domain-modeling ...) encode a specific way of working and overlap with
+#   superpowers, which is already a default. Install those by hand if you want
+#   them:  npx -y skills add mattpocock/skills --skill <name> -g
+#
+#   grill-me    interviews you one question at a time until every branch of a
+#               plan is resolved. User-invoked only.
+#   grilling    LAW: grill-me is a two-line stub whose entire body is "Call the
+#               Skill tool with 'grilling'". Install grill-me WITHOUT grilling
+#               and you get a skill that fires and then dead-ends. They ship as
+#               separate directories, so nothing upstream enforces this.
+#   handoff     compacts the conversation into a handoff document for the next
+#               agent. User-invoked only.
+#   wait-what   re-pitches a message that did not land, in Simplified Technical
+#               English. User-invoked only.
+#
+# CONTEXT COST
+#   grill-me, handoff and wait-what all set `disable-model-invocation: true`,
+#   so the model can never fire them on its own -- they cost one description
+#   line each and nothing more. `grilling` does NOT set it, by design: it is
+#   what grill-me delegates to, and it also auto-fires on "grill" phrasing.
+POCOCK_REPO="mattpocock/skills"
+# Newline-delimited, not space-delimited: consumed one per --skill flag.
+POCOCK_SKILLS="grill-me
+grilling
+handoff
+wait-what"
+
+OPTIONAL_TOOLS="rtk superpowers context-mode caveman pocock code-review-graph token-savior"
+DEFAULT_TOOLS="rtk superpowers context-mode caveman pocock"
 
 # Repo root, or empty when we are not in one.
 repo_root() { git rev-parse --show-toplevel 2>/dev/null; }
@@ -1327,10 +1430,15 @@ uninstall_rtk() {
 # resolve; adding one that is already present is a no-op, so it is safe to
 # always do it.
 # ---------------------------------------------------------------------------
+# PERF LAW: `claude plugin list` takes seconds, not milliseconds. This helper
+# is called once per plugin per command, and the inventory calls it for every
+# feature -- shelling out each time turned `agent-tools status` into a
+# multi-minute hang. Read the list once per process and reuse it. The cache is
+# per-invocation, so it cannot go stale within a run that changes nothing.
 plugin_installed() {   # plugin_installed <name@marketplace>
     have claude || return 1
-    claude plugin list 2>/dev/null | grep -q "^  ❯ $1$" && return 0
-    claude plugin list 2>/dev/null | grep -qF "$1"
+    plugin_list_cached 2>/dev/null | grep -q "^  ❯ $1$" && return 0
+    plugin_list_cached 2>/dev/null | grep -qF "$1"
 }
 
 # Say something true when --project meets a plugin that is ALREADY installed
@@ -1417,7 +1525,7 @@ install_crg() {
     hdr "code-review-graph (second knowledge graph — opt-in)"
     have uv || { c_bad "uv is required"; return 1; }
     if crg_installed; then
-        c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}') present"
+        c_ok "code-review-graph $(uv_tool_version "$CRG_PKG") present"
     else
         confirm "code-review-graph (30 MCP tools — read docs/TOOLS.md on overlap first)" || return 0
         uv tool install "$CRG_PKG" >/dev/null 2>&1 \
@@ -1514,6 +1622,170 @@ install_extras() {     # everything install-machine adds by default
     install_rtk
     install_superpowers
     install_context_mode
+    install_pocock
+}
+
+# ---------------------------------------------------------------------------
+# pocock — grill-me / grilling / handoff / wait-what from mattpocock/skills.
+#
+# INSTALL MECHANISM: the same `npx skills add ... -g` path caveman already
+# uses, so the skills land in ~/.agents/skills and are symlinked into every
+# agent's own skills directory. That is deliberate: the Claude Code plugin
+# route would reach Claude Code only, and half this repo's point is that the
+# other agents get the same treatment.
+#
+# LAW: --skill takes ONE name. Verified 2026-08-19 against skills CLI:
+# `--skill 'a,b,c'` prints "No matching skills found for: a,b,c", lists the
+# repo's skills and installs NOTHING, while exiting 0. A comma-separated list
+# is a silent no-op, not an error. Repeat the flag instead.
+# ---------------------------------------------------------------------------
+pocock_dir() { printf '%s/.agents/skills' "$HOME"; }
+
+# On native Windows the skills CLI's default SYMLINK into each agent directory
+# needs either Administrator or Developer Mode; without one it fails, and on a
+# filesystem without symlink support it can appear to succeed and leave the
+# agent directories empty. `--copy` writes real files instead. Harmless
+# elsewhere, so it is applied only where it is needed.
+skills_copy_flag() { [ "$PLATFORM" = windows ] && printf -- '--copy'; return 0; }
+
+# Installed means ALL of them: grill-me without grilling is a dead end, so a
+# partial install is a broken install and must not report success.
+pocock_installed() {
+    local sk
+    printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+        [ -n "$sk" ] || continue
+        [ -d "$(pocock_dir)/$sk" ] || exit 1
+    done
+}
+pocock_missing() {     # prints the ones that are absent, one per line
+    local sk
+    printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+        [ -n "$sk" ] || continue
+        [ -d "$(pocock_dir)/$sk" ] || printf '%s\n' "$sk"
+    done
+}
+
+# Content fingerprint of the installed skills. Used to tell a real update from
+# a no-op, because the CLI's exit status cannot. Falls back to size+mtime when
+# no checksum tool is around, which is enough to detect "something changed".
+pocock_fingerprint() {
+    local d; d="$(pocock_dir)"
+    [ -d "$d" ] || { printf 'none'; return 0; }
+    local sk files=""
+    for sk in $(printf '%s\n' "$POCOCK_SKILLS"); do
+        [ -d "$d/$sk" ] && files="$files $d/$sk"
+    done
+    [ -n "$files" ] || { printf 'none'; return 0; }
+    # -L so we hash the real files, not the symlinks the CLI creates.
+    if have shasum; then
+        find -L $files -type f 2>/dev/null | sort | xargs shasum 2>/dev/null | shasum | awk '{print $1}'
+    elif have sha256sum; then
+        find -L $files -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null | sha256sum | awk '{print $1}'
+    else
+        find -L $files -type f -exec ls -l {} \; 2>/dev/null | awk '{print $5, $9}' | sort | cksum
+    fi
+}
+
+# Build the repeated --skill flags. Newline-delimited input, so a skill name
+# with a space in it would still survive.
+_pocock_flags() {
+    local sk
+    printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+        [ -n "$sk" ] || continue
+        printf -- '--skill\n%s\n' "$sk"
+    done
+}
+
+install_pocock() {
+    hdr "pocock (grill-me · handoff · wait-what)"
+    if [ "$SKIP_POCOCK" = 1 ]; then c_warn "skipped (--no-pocock)"; return 0; fi
+    if ! node_ok; then
+        c_warn "needs Node >= $NODE_MIN for npx — skipping (everything else still works)"
+        return 0
+    fi
+    if pocock_installed && [ "$NO_INSTALL" = 1 ] && [ "$ASSUME_YES" = 0 ]; then
+        c_ok "pocock skills already installed (left as-is)"; return 0
+    fi
+    pocock_installed || confirm "the pocock skills (4 markdown skills; no MCP server, no hooks)" || return 0
+
+    # Same neutral-cwd trick as caveman: without -g the CLI writes
+    # $PWD/.agents/skills, and we do not want that in whatever repo you
+    # happened to be standing in.
+    local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+    local flags; flags="$(_pocock_flags)"
+    # Deliberate word splitting on a newline-delimited list (SC2046/SC2086).
+    # shellcheck disable=SC2046,SC2086
+    ( cd "$neutral" && IFS='
+' && npx -y skills add "$POCOCK_REPO" $flags --agent '*' -g -y $(skills_copy_flag) >/dev/null 2>&1 )
+    [ -d "$neutral" ] && rm -rf "$neutral" 2>/dev/null
+
+    local missing; missing="$(pocock_missing)"
+    if [ -z "$missing" ]; then
+        c_ok "pocock skills installed globally (~/.agents/skills, all agents)"
+        echo "        /grill-me · /handoff · /wait-what   (grilling backs grill-me)"
+    else
+        c_bad "these did not install: $(printf '%s' "$missing" | tr '\n' ' ')"
+        c_warn "retry: npx -y skills add $POCOCK_REPO --skill grill-me --skill grilling --skill handoff --skill wait-what --agent '*' -g -y"
+    fi
+}
+
+pocock_cmd() {
+    case "${1:-status}" in
+        install) SKIP_POCOCK=0; install_pocock ;;
+        status)
+            if pocock_installed; then
+                c_ok "pocock skills installed (~/.agents/skills)"
+                local sk
+                printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+                    [ -n "$sk" ] && echo "        $sk"
+                done
+                echo
+                echo "  In a session:  /grill-me · /handoff · /wait-what"
+                echo "  grilling is the engine behind /grill-me, not something you call."
+            else
+                local missing; missing="$(pocock_missing)"
+                c_warn "missing: $(printf '%s' "$missing" | tr '\n' ' ')"
+                c_warn "install: agent-tools install pocock"
+            fi ;;
+        update|upgrade)
+            node_ok || { c_bad "needs Node >= $NODE_MIN"; return 1; }
+            # LAW: `skills update` EXITS 0 EVEN FOR A SKILL THAT DOES NOT EXIST.
+            # Verified 2026-08-19: `skills update no-such-skill-xyz -g -y` -> 0.
+            # So its exit status proves nothing and must not be reported as
+            # success. We fingerprint the skill files before and after instead,
+            # which distinguishes the three outcomes that actually matter:
+            # changed, already current, and disappeared.
+            local before after; before="$(pocock_fingerprint)"
+            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+            local sk
+            printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+                [ -n "$sk" ] || continue
+                ( cd "$neutral" && npx -y skills update "$sk" -g -y >/dev/null 2>&1 )
+            done
+            rm -rf "$neutral" 2>/dev/null
+            after="$(pocock_fingerprint)"
+            local missing; missing="$(pocock_missing)"
+            if [ -n "$missing" ]; then
+                c_bad "after updating, these are gone: $(printf '%s' "$missing" | tr '\n' ' ')"
+                c_warn "reinstall: agent-tools install pocock"
+                return 1
+            elif [ "$before" = "$after" ]; then
+                c_ok "pocock skills already current (no change)"
+            else
+                c_ok "pocock skills updated (files changed)"
+            fi ;;
+        uninstall|remove)
+            node_ok || { c_bad "needs Node >= $NODE_MIN"; return 1; }
+            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+            local sk
+            printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
+                [ -n "$sk" ] || continue
+                ( cd "$neutral" && npx -y skills remove "$sk" -g -y >/dev/null 2>&1 )
+            done
+            rm -rf "$neutral" 2>/dev/null
+            c_ok "pocock skills removed — restart your agent for it to take effect" ;;
+        *) c_bad "usage: agent-tools pocock [status|install|update|uninstall]"; return 2 ;;
+    esac
 }
 
 tool_status_line() {   # tool_status_line <name>
@@ -1544,11 +1816,19 @@ tool_status_line() {   # tool_status_line <name>
       caveman)
         if caveman_installed; then
             local lvl; lvl="$(caveman_level)"
-            c_ok "caveman installed${lvl:+ — ACTIVE ($lvl)}"
+            c_ok "caveman installed (machine-wide, all agents)${lvl:+ — ACTIVE ($lvl)}"
         else c_warn "caveman not installed"; fi ;;
+      pocock)
+        if pocock_installed; then
+            c_ok "pocock skills installed (machine-wide, all agents)"
+            echo "        grill-me, grilling, handoff, wait-what"
+        else
+            local _miss; _miss="$(pocock_missing)"
+            c_warn "pocock skills missing: $(printf '%s' "$_miss" | tr '\n' ' ')"
+        fi ;;
       code-review-graph)
         if crg_installed; then
-            c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}') (opt-in)"
+            c_ok "code-review-graph $(uv_tool_version "$CRG_PKG") (opt-in)"
             claude mcp list 2>/dev/null | grep -q "^code-review-graph" \
                 && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire code-review-graph)"
         else c_warn "code-review-graph not installed (opt-in)"; fi ;;
@@ -1559,6 +1839,265 @@ tool_status_line() {   # tool_status_line <name>
                 && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire token-savior)"
         else c_warn "token-savior not installed (opt-in)"; fi ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# INVENTORY: what is here, what is not, and which version of each.
+#
+# The version sources are deliberately different per tool because there is no
+# common one: a uv tool answers --version, a Claude Code plugin only appears in
+# `claude plugin list`, and a skill pack has no version at all -- it is
+# markdown from a public repo, so the honest answer is a content fingerprint
+# and the date it last changed.
+# ---------------------------------------------------------------------------
+
+# `claude plugin list` is slow enough that calling it per tool is noticeable.
+# Read it once per process.
+_PLUGIN_LIST_CACHE=""
+plugin_list_cached() {
+    have claude || return 1
+    [ -n "$_PLUGIN_LIST_CACHE" ] || _PLUGIN_LIST_CACHE="$(claude plugin list 2>/dev/null)"
+    printf '%s\n' "$_PLUGIN_LIST_CACHE"
+}
+plugin_version() {     # plugin_version <name@marketplace>
+    plugin_list_cached 2>/dev/null \
+        | awk -v want="$1" '
+            $0 ~ "❯ " want { found=1; next }
+            found && /Version:/ { sub(/^ *Version: */, ""); print; exit }' 2>/dev/null
+}
+
+# Skill packs carry no version. The honest substitute is "how many of the
+# skills this pack is supposed to install are actually present", plus when they
+# last changed.
+#
+# LAW: count the EXPECTED NAMES, never the directory entries. ~/.agents/skills
+# is shared by every pack -- counting entries there reported pocock as "24/4",
+# and counting files inside one skill's directory reported caveman as "2/1".
+skills_present() {     # skills_present <dir> <newline-delimited names>
+    local d="$1" names="$2" n=0 sk
+    while IFS= read -r sk; do
+        [ -n "$sk" ] || continue
+        [ -e "$d/$sk" ] && n=$((n+1))
+    done <<EOF
+$names
+EOF
+    printf '%s' "$n"
+}
+skills_stamp() {       # skills_stamp <dir> <newline-delimited expected names>
+    local d="$1" names="$2" n want newest=""
+    [ -d "$d" ] || { printf 'not installed'; return 1; }
+    n="$(skills_present "$d" "$names")"
+    want="$(printf '%s\n' "$names" | grep -c .)"
+    newest="$(file_mtime "$d" 2>/dev/null)"
+    printf '%s/%s skills%s' "$n" "$want" "${newest:+, updated $newest}"
+}
+
+# caveman ships as one directory per skill, all prefixed `caveman`. Enumerate
+# what is on disk rather than hardcoding a list that upstream can grow.
+caveman_skill_names() {
+    local e
+    for e in "$HOME"/.agents/skills/caveman*; do
+        [ -d "$e" ] && basename "$e"
+    done
+}
+
+# LAW: NEVER ask a uv-installed tool for its own version. `token-savior
+# --version` does not print one -- it boots the recall server, auto-discovers
+# every project on the machine and blocks, which turned the inventory into a
+# hang. `uv tool list` is one fast call that answers for all three of them.
+_UV_LIST_CACHE=""
+uv_tool_version() {    # uv_tool_version <uv package name>
+    have uv || return 1
+    [ -n "$_UV_LIST_CACHE" ] || _UV_LIST_CACHE="$(uv tool list 2>/dev/null)"
+    printf '%s\n' "$_UV_LIST_CACHE" \
+        | awk -v want="$1" '$1 == want { sub(/^v/, "", $2); print $2; exit }'
+}
+
+tool_version() {       # tool_version <feature> -> version string, or nothing
+    case "$1" in
+      rtk)               have rtk && rtk --version 2>/dev/null | awk '{print $2}' ;;
+      graphify)          uv_tool_version graphifyy ;;
+      code-review-graph) uv_tool_version "$CRG_PKG" ;;
+      token-savior)      uv_tool_version "$TS_PKG" ;;
+      superpowers)       plugin_version "$SUPERPOWERS_PLUGIN" ;;
+      context-mode)      plugin_version "$CONTEXT_MODE_PLUGIN" ;;
+      claude-mem)        plugin_version "claude-mem@thedotmack" ;;
+      caveman)           skills_stamp "$HOME/.agents/skills" "$(caveman_skill_names)" ;;
+      pocock)            skills_stamp "$(pocock_dir)" "$POCOCK_SKILLS" ;;
+    esac
+}
+
+# One line per feature: state, name, version, and -- when absent -- the exact
+# command that installs it. "Available" with no way to get it is not an
+# inventory, it is a tease.
+feature_install_hint() {
+    case "$1" in
+        graphify)   printf 'agent-tools install-machine' ;;
+        claude-mem) printf 'agent-tools install-machine' ;;
+        *)          printf 'agent-tools install %s' "$1" ;;
+    esac
+}
+feature_kind() {
+    case "$1" in
+        rtk)                        printf 'hook' ;;
+        superpowers|context-mode)   printf 'plugin' ;;
+        caveman|pocock)             printf 'skills' ;;
+        claude-mem)                 printf 'memory' ;;
+        *)                          printf 'MCP' ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# AGENTS — the same tools, without an MCP server in sight.
+#
+# WHY THIS EXISTS
+#   Every graph tool here ships a CLI, and the CLI is the cheaper interface by
+#   a wide margin. An MCP server re-sends its whole tool schema EVERY session
+#   whether you call it or not -- graphify's is ~1.5k tokens, code-review-graph
+#   ships 30 tools. A CLI costs ZERO until the agent runs it, and any agent
+#   that can run a shell command can run it.
+#
+#   That also makes the tools portable. Codex, Antigravity, Cursor, Gemini and
+#   the rest do not read Claude Code's MCP config and never will. They can all
+#   run `graphify query`.
+#
+# SO: MCP is the OPTIONAL path, not the default one. `init --no-mcp` wires no
+# server at all and instead tells the agent, in its own instruction file, which
+# commands to run.
+# ---------------------------------------------------------------------------
+
+# Platforms `graphify install --platform` knows. Verified against
+# `graphify --help` on 0.9.48 -- do not add a name it will reject.
+GRAPHIFY_PLATFORMS="claude codex opencode aider amp agents cursor antigravity gemini kiro pi devin droid trae claw codebuddy hermes windows"
+
+# Where each agent keeps its config, used only to DETECT that it is installed.
+# Detection is deliberately read-only: agent-tools never edits another host's
+# config file, it reports and instructs.
+agent_home() {
+    case "$1" in
+        claude)      printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ;;
+        codex)       printf '%s/.codex' "$HOME" ;;
+        antigravity) printf '%s/.antigravity' "$HOME" ;;
+        gemini)      printf '%s/.gemini' "$HOME" ;;
+        cursor)      printf '%s/.cursor' "$HOME" ;;
+        opencode)    printf '%s/.opencode' "$HOME" ;;
+        aider)       printf '%s/.aider' "$HOME" ;;
+        *)           return 1 ;;
+    esac
+}
+agent_installed() { local d; d="$(agent_home "$1" 2>/dev/null)" && [ -d "$d" ]; }
+
+# Which agents are actually on this machine.
+detected_agents() {
+    local a
+    for a in claude codex antigravity gemini cursor opencode aider; do
+        agent_installed "$a" && printf '%s\n' "$a"
+    done
+}
+
+agents_cmd() {
+    hdr "Agents on this machine"
+    local found; found="$(detected_agents)"
+    if [ -z "$found" ]; then
+        c_warn "none detected — looked for claude, codex, antigravity, gemini, cursor, opencode, aider"
+    else
+        local a
+        while IFS= read -r a; do
+            [ -n "$a" ] || continue
+            printf '  \033[32m✓\033[0m %-12s %s\n' "$a" "$(agent_home "$a")"
+        done <<EOF
+$found
+EOF
+    fi
+
+    hdr "How each tool reaches them"
+    cat <<'MAP'
+  skills      ~/.agents/skills, symlinked into EVERY agent's skills dir.
+              caveman and pocock are already there for all of them.
+                  agent-tools install caveman | pocock
+
+  CLI         zero standing token cost — nothing is sent until the agent runs
+              the command. Works in any agent that can run a shell:
+                  graphify query "how does auth work"
+                  graphify affected "SomeClass"      graphify god-nodes
+                  code-review-graph query|impact|search|architecture
+                  ts get|search|ctx|structure        rtk <any command>
+
+  graphify    installs its own skill per platform, no MCP:
+   skill          graphify install --platform codex
+                  graphify install --platform antigravity
+
+  hooks       rtk and claude-mem hook the host. Claude Code is wired
+              automatically; other hosts use their own mechanism, and the CLI
+              works regardless.
+
+  MCP         OPTIONAL, and Claude-Code-only here. Costs its schema every
+              session whether called or not. Add per repo when you want it:
+                  agent-tools wire graphify | code-review-graph | token-savior
+                  agent-tools unwire <name>
+MAP
+
+    hdr "Give the detected agents the graphify skill"
+    if ! have graphify; then
+        c_warn "graphify not installed — agent-tools install-machine"
+        return 0
+    fi
+    local a done_any=0
+    while IFS= read -r a; do
+        [ -n "$a" ] || continue
+        case " $GRAPHIFY_PLATFORMS " in
+            *" $a "*) ;;
+            *) c_warn "$a: graphify has no --platform for it; use the CLI directly"; continue ;;
+        esac
+        printf '        graphify install --platform %s\n' "$a"
+        done_any=1
+    done <<EOF
+$found
+EOF
+    [ "$done_any" = 1 ] && c_ok "run those to give each agent the graphify skill (no MCP)"
+    return 0
+}
+
+inventory_cmd() {
+    hdr "agent-tools $VERSION   (released $VERSION_DATE)"
+
+    local f ver installed=() missing=()
+    for f in $ALL_FEATURES; do
+        if feature_present "$f"; then installed+=("$f"); else missing+=("$f"); fi
+    done
+
+    hdr "Installed (${#installed[@]})"
+    if [ "${#installed[@]}" = 0 ]; then
+        c_warn "nothing yet — agent-tools install-machine"
+    else
+        for f in "${installed[@]}"; do
+            ver="$(tool_version "$f" 2>/dev/null)"
+            printf '  \033[32m✓\033[0m %-19s %-8s %s\n' "$f" "$(feature_kind "$f")" "${ver:-version unknown}"
+        done
+    fi
+
+    hdr "Available (${#missing[@]})"
+    if [ "${#missing[@]}" = 0 ]; then
+        c_ok "everything agent-tools manages is installed"
+    else
+        for f in "${missing[@]}"; do
+            printf '  \033[33m-\033[0m %-19s %-8s %s\n' "$f" "$(feature_kind "$f")" "$(feature_install_hint "$f")"
+        done
+    fi
+
+    # Defaults vs opt-in matters more than installed/not for deciding what to
+    # add, so say which of the missing ones are deliberate omissions.
+    local optin=""
+    for f in code-review-graph token-savior; do
+        feature_present "$f" || optin="$optin $f"
+    done
+    [ -n "$optin" ] && { echo; c_ok "not installed by default (they overlap graphify):$optin"; }
+
+    tools_overlap_warnings
+    echo
+    echo "  detail:    agent-tools tools        per-tool status and wiring"
+    echo "  health:    agent-tools doctor       what is broken and how to fix it"
+    echo "  remove:    agent-tools uninstall <name|all>"
 }
 
 tools_cmd() {
@@ -1573,6 +2112,10 @@ tools_cmd() {
     echo "  update:    agent-tools update <name>       (or: update all)"
     echo "  remove:    agent-tools uninstall <name> [--project]"
     echo "  compare:   docs/TOOLS.md — what each one is best at"
+    echo
+    echo "  --project confines a hook, plugin or MCP entry to this repo."
+    echo "  It does NOT apply to caveman or pocock: skills live in"
+    echo "  ~/.agents/skills, one copy for every repo and every agent."
 }
 
 # Overlaps are the whole reason two of these are opt-in, so say it where
@@ -1616,9 +2159,11 @@ tools_overlap_warnings() {
 resolve_tool() {       # normalise the aliases people actually type
     case "$1" in
         rtk) echo rtk ;;
+        graphify|graph) echo graphify ;;
         superpowers|superpower) echo superpowers ;;
         context-mode|contextmode|ctx) echo context-mode ;;
         caveman) echo caveman ;;
+        pocock|mattpocock|pocock-skills|grill-me|grilling|handoff|wait-what) echo pocock ;;
         code-review-graph|crg) echo code-review-graph ;;
         token-savior|token-saviour|tokensavior|ts) echo token-savior ;;
         *) return 1 ;;
@@ -1632,52 +2177,381 @@ install_tool_cmd() {
         c_bad "--project needs a git repository"; return 1
     fi
     case "$name" in
-      defaults) SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0
+      defaults) SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0 SKIP_POCOCK=0
                 install_extras; return 0 ;;
-      all)      SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0
+      all)      SKIP_RTK=0 SKIP_SUPERPOWERS=0 SKIP_CONTEXT_MODE=0 SKIP_CAVEMAN=0 SKIP_POCOCK=0
                 install_extras; install_crg; install_ts; return 0 ;;
     esac
     local t; t="$(resolve_tool "$name")" || { c_bad "unknown tool: $name"; return 2; }
+    # LAW: skills have NO per-project form. `skills add` writes either
+    # ~/.agents/skills (-g) or $PWD/.agents/skills, and the second is not a
+    # scope -- it is a stray directory in whatever repo you were standing in,
+    # which no agent then reads. Accepting --project here silently installed
+    # machine-wide anyway, so the flag lied. Say it and continue globally.
+    if [ "$SCOPE_PROJECT" = 1 ]; then
+        case "$t" in
+            caveman|pocock)
+                c_warn "$t is a skill pack — it has no per-project form."
+                c_warn "    installing machine-wide (~/.agents/skills) as usual." ;;
+        esac
+    fi
     case "$t" in
         rtk)               SKIP_RTK=0; install_rtk ;;
         superpowers)       SKIP_SUPERPOWERS=0; install_superpowers ;;
         context-mode)      SKIP_CONTEXT_MODE=0; install_context_mode ;;
         caveman)           SKIP_CAVEMAN=0; install_caveman ;;
+        pocock)            SKIP_POCOCK=0; install_pocock ;;
         code-review-graph) install_crg ;;
         token-savior)      install_ts ;;
     esac
 }
 
+# ---------------------------------------------------------------------------
+# UNINSTALL, and the data question
+#
+# Removing a tool and destroying what it recorded are two different decisions,
+# and 3.3.0 and earlier only ever made the first one -- every uninstall ended
+# with a "store kept:" line and left it there. That is a safe default and a
+# terrible discovery mechanism: the data sat on disk indefinitely because
+# nothing ever offered to remove it.
+#
+# So: name the data, size it, and ask. Default NO. `--purge` answers yes for
+# scripts, `--keep-data` answers no. Anything unregenerable is labelled as
+# such, because "rebuild it later" is true for a graph and false for rtk's
+# savings history.
+# ---------------------------------------------------------------------------
+
+# Newline-delimited "<path>|<what it is>|<regenerable?>" for paths that EXIST.
+# Regenerable = "rebuilding costs time, not information".
+tool_data_paths() {
+    local t="$1" root
+    case "$t" in
+      rtk)
+        local d; d="$(rtk_config_dir)"
+        [ -d "$d" ] && printf '%s|filters.toml and history.db — your entire rtk savings record|NO\n' "$d"
+        ;;
+      context-mode)
+        [ -d "$HOME/.claude/context-mode" ] && \
+            printf '%s|indexed sessions and the FTS5 knowledge base|NO\n' "$HOME/.claude/context-mode"
+        ;;
+      token-savior)
+        [ -d "$HOME/.local/share/token-savior" ] && \
+            printf '%s|the recall store: memory engine plus vector index|NO\n' "$HOME/.local/share/token-savior"
+        root="$(repo_root)"
+        [ -n "$root" ] && [ -d "$root/.token-savior" ] && \
+            printf '%s|this repo'"'"'s index|yes — rebuilt by re-wiring|repo\n' "$root/.token-savior"
+        ;;
+      code-review-graph)
+        root="$(repo_root)"
+        [ -n "$root" ] && [ -d "$root/.code-review-graph" ] && \
+            printf '%s|this repo'"'"'s parsed graph|yes — rebuilt by re-wiring|repo\n' "$root/.code-review-graph"
+        ;;
+      graphify)
+        [ -d "$HOME/.config/graphify" ] && \
+            printf '%s|graphify config, including any API key you set|NO\n' "$HOME/.config/graphify"
+        root="$(repo_root)"
+        [ -n "$root" ] && [ -d "$root/graphify-out" ] && \
+            printf '%s|this repo'"'"'s graph and semantic cache|yes — but a deep re-run costs hours|repo\n' "$root/graphify-out"
+        ;;
+      claude-mem)
+        [ -d "$HOME/.claude-mem" ] && \
+            printf '%s|every session claude-mem has ever captured|NO\n' "$HOME/.claude-mem"
+        ;;
+      # caveman, pocock and superpowers keep nothing of yours: a skill is a
+      # markdown file from a public repo, and reinstalling restores it exactly.
+      caveman|pocock|superpowers) : ;;
+    esac
+}
+
+# Human-sized. du on a big store is slow enough to notice, so cap the wait.
+path_size() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
+
+# Show what would be lost. Returns 0 if there IS data, 1 if there is none.
+report_tool_data() {
+    local t="$1" any=1 path what regen scope
+    while IFS='|' read -r path what regen scope; do
+        [ -n "${path:-}" ] || continue
+        [ "$any" = 1 ] && { echo; c_warn "removing $t would leave this behind:"; any=0; }
+        data_line "$path" "$what" "$regen" "$scope"
+    done <<EOF
+$(tool_data_paths "$t")
+EOF
+    return "$any"
+}
+
+# One row of the data bill. Shared by the per-tool report and `uninstall all`
+# so the two cannot describe the same path differently.
+data_line() {          # data_line <path> <what> <regen> <scope>
+    printf '        %s  (%s)%s\n' "$1" "$(path_size "$1")" \
+        "$([ "${4:-}" = repo ] && printf '   [THIS REPO]')"
+    printf '            %s\n' "$2"
+    case "$3" in
+        NO) printf '            \033[31mcannot be regenerated\033[0m\n' ;;
+        *)  printf '            %s\n' "$3" ;;
+    esac
+}
+
+# A DELETE prompt. Deliberately not confirm(): that one defaults to yes, which
+# is right for installing and wrong for destroying. Default here is no, and a
+# non-interactive run without --purge keeps the data rather than guessing.
+confirm_delete() {   # confirm_delete "<what>" -> 0 = delete it
+    [ "$KEEP_DATA" = 1 ] && { c_ok "data kept (--keep-data)"; return 1; }
+    if [ "$PURGE_DATA" = 1 ]; then c_warn "deleting: $1  (--purge)"; return 0; fi
+
+    local src=""
+    if [ -t 0 ]; then src="stdin"
+    elif { : < /dev/tty; } 2>/dev/null; then src="tty"; fi
+    if [ -z "$src" ]; then
+        c_ok "data kept (non-interactive — re-run with --purge to delete)"
+        return 1
+    fi
+
+    printf '  \033[31m?\033[0m DELETE %s? This cannot be undone. [y/N] ' "$1"
+    local reply=""
+    if [ "$src" = tty ]; then
+        read -r reply < /dev/tty || { echo; c_ok "no answer — data kept"; return 1; }
+    else
+        read -r reply || { echo; c_ok "no answer — data kept"; return 1; }
+    fi
+    case "$reply" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) c_ok "data kept"; return 1 ;;
+    esac
+}
+
+# Offer to delete a tool's data after the tool itself is gone.
+handle_tool_data() {
+    local t="$1"
+    report_tool_data "$t" || return 0          # nothing to decide
+    confirm_delete "the data listed above" || {
+        c_warn "restore the tool later and it picks this up again"
+        return 0
+    }
+    local path what regen scope
+    while IFS='|' read -r path what regen scope; do
+        [ -n "${path:-}" ] || continue
+        # Refuse anything that is not under $HOME or the current repo. A bad
+        # expansion here deletes something that was never ours.
+        case "$path" in
+            "$HOME"/*) ;;
+            "$(repo_root 2>/dev/null)"/*) ;;
+            *) c_bad "refusing to delete outside HOME or this repo: $path"; continue ;;
+        esac
+        # A repo path is decided by your CWD, not by the tool name, so --purge
+        # is not enough consent for it. This is the exact accident that cost
+        # this project a graph: a --purge meant for a sandbox, run one
+        # directory too high.
+        if [ "${scope:-}" = repo ] && [ "$PURGE_DATA" = 1 ] && [ "$PURGE_REPO" != 1 ]; then
+            c_warn "kept (repo-scoped): $path"
+            c_warn "    --purge covers machine-wide data only."
+            c_warn "    add --purge-repo to include THIS repo's data."
+            continue
+        fi
+        rm -rf "$path" 2>/dev/null && c_ok "deleted $path" || c_bad "could not delete $path"
+    done <<EOF
+$(tool_data_paths "$t")
+EOF
+}
+
+# Everything `install-machine` puts on a machine, in the order it is safe to
+# remove: MCP tools first (they only unwire), then plugins and skills, then the
+# things other parts depend on.
+ALL_FEATURES="code-review-graph token-savior rtk context-mode superpowers caveman pocock graphify claude-mem"
+
 uninstall_tool_cmd() {
     local name="${1:-}"
-    local t; t="$(resolve_tool "$name")" || { c_bad "usage: agent-tools uninstall <$(echo $OPTIONAL_TOOLS | tr ' ' '|')>"; return 2; }
+    if [ -z "$name" ]; then
+        c_bad "usage: agent-tools uninstall <$(echo $OPTIONAL_TOOLS | tr ' ' '|')|graphify|claude-mem|all>"
+        c_warn "    add --purge to delete each tool's data without being asked,"
+        c_warn "    or --keep-data to keep all of it without being asked."
+        return 2
+    fi
+    [ "$name" = all ] && { uninstall_all; return $?; }
+
+    local t
+    case "$name" in
+        graphify)   t=graphify ;;
+        claude-mem|memory) t=claude-mem ;;
+        *) t="$(resolve_tool "$name")" || {
+               c_bad "unknown tool: $name"
+               c_warn "    known: $OPTIONAL_TOOLS graphify claude-mem all"; return 2; } ;;
+    esac
+    uninstall_one "$t"
+}
+
+# Remove ONE feature, then deal with its data. Split out of the dispatcher so
+# `uninstall all` runs the identical path rather than a parallel copy that can
+# drift away from it.
+uninstall_one() {
+    local t="$1"
+    hdr "uninstall $t"
     case "$t" in
         rtk)          uninstall_rtk ;;
         superpowers)  uninstall_plugin "$SUPERPOWERS_PLUGIN" superpowers ;;
-        context-mode) uninstall_plugin "$CONTEXT_MODE_PLUGIN" context-mode
-                      c_warn "state kept: ~/.claude/context-mode (delete it yourself if you mean it)" ;;
+        context-mode) uninstall_plugin "$CONTEXT_MODE_PLUGIN" context-mode ;;
         caveman)      caveman_cmd uninstall ;;
+        pocock)       pocock_cmd uninstall ;;
         code-review-graph)
                       unwire_crg
                       [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$CRG_PKG" >/dev/null 2>&1 && c_ok "code-review-graph removed"; } ;;
         token-savior)
                       unwire_ts
-                      [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$TS_PKG" >/dev/null 2>&1 && c_ok "token-savior removed"; }
-                      c_warn "store kept: ~/.local/share/token-savior" ;;
+                      [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$TS_PKG" >/dev/null 2>&1 && c_ok "token-savior removed"; } ;;
+        graphify)
+                      if [ "$SCOPE_PROJECT" = 1 ]; then
+                          have claude && claude mcp remove graphify -s local >/dev/null 2>&1 \
+                              && c_ok "graphify MCP removed from this repo"
+                      else
+                          have claude && claude mcp remove graphify -s local >/dev/null 2>&1
+                          have uv && uv tool uninstall graphifyy >/dev/null 2>&1 \
+                              && c_ok "graphify removed" || c_warn "graphify binary not removed (uv missing?)"
+                      fi ;;
+        claude-mem)
+                      # It installs and wires itself, so it uninstalls itself too.
+                      if cm_installed; then
+                          npx -y claude-mem uninstall >/dev/null 2>&1 \
+                              && c_ok "claude-mem uninstalled" \
+                              || c_warn "claude-mem uninstall failed — try: npx claude-mem uninstall"
+                          # Without a backend, record that fact rather than
+                          # letting the default silently reinstate one.
+                          remember_backend none
+                          c_ok "memory backend set to none"
+                      else c_warn "claude-mem not installed"; fi ;;
+        *) c_bad "no uninstall path for $t"; return 2 ;;
     esac
+    handle_tool_data "$t"
+}
+
+# `uninstall all`. Shows the FULL data bill before touching anything, then
+# takes one typed confirmation for the removal. Data still gets its own
+# per-feature prompt unless --purge/--keep-data already answered.
+uninstall_all() {
+    hdr "uninstall everything agent-tools installed"
+
+    local present=() f
+    for f in $ALL_FEATURES; do
+        feature_present "$f" && present+=("$f")
+    done
+    if [ "${#present[@]}" = 0 ]; then
+        c_ok "nothing installed — nothing to remove"; return 0
+    fi
+
+    echo "  These will be removed:"
+    for f in "${present[@]}"; do printf '        %s\n' "$f"; done
+
+    # The whole bill, before any decision, so nobody discovers a store they
+    # cared about three prompts into a teardown.
+    local any=1 path what regen scope
+    for f in "${present[@]}"; do
+        while IFS='|' read -r path what regen scope; do
+            [ -n "${path:-}" ] || continue
+            [ "$any" = 1 ] && { echo; c_warn "DATA AT RISK:"; any=0; }
+            data_line "$path" "$what" "$regen" "$scope"
+        done <<EOF
+$(tool_data_paths "$f")
+EOF
+    done
+    if [ "$any" = 0 ]; then
+        echo
+        if [ "$PURGE_DATA" = 1 ]; then
+            if [ "$PURGE_REPO" = 1 ]; then
+                c_bad "--purge --purge-repo: ALL of the above will be deleted."
+            else
+                c_bad "--purge is set: machine-wide data above will be deleted."
+                c_warn "rows marked [THIS REPO] are KEPT — add --purge-repo for those."
+            fi
+        elif [ "$KEEP_DATA" = 1 ]; then
+            c_ok "--keep-data is set: none of the above will be deleted."
+        else
+            c_warn "you will be asked about each one separately."
+        fi
+    fi
+
+    # Typed confirmation. A single keypress is too cheap for this one.
+    if [ "$ASSUME_YES" != 1 ]; then
+        local src=""
+        if [ -t 0 ]; then src="stdin"
+        elif { : < /dev/tty; } 2>/dev/null; then src="tty"; fi
+        if [ -z "$src" ]; then
+            c_bad "non-interactive — re-run with --yes to confirm"; return 1
+        fi
+        echo
+        printf '  \033[31m?\033[0m Type REMOVE to uninstall all of the above: '
+        local reply=""
+        if [ "$src" = tty ]; then read -r reply < /dev/tty || reply=""
+        else read -r reply || reply=""; fi
+        [ "$reply" = REMOVE ] || { echo; c_ok "cancelled — nothing was touched"; return 1; }
+    fi
+
+    for f in "${present[@]}"; do uninstall_one "$f"; done
+
+    hdr "done"
+    c_ok "reinstall any time:  agent-tools install-machine"
+    return 0
+}
+
+# Is a feature actually on this machine? Used so `uninstall all` lists what is
+# really there instead of a menu of things you never had.
+feature_present() {
+    case "$1" in
+        rtk)               rtk_installed ;;
+        superpowers)       plugin_installed "$SUPERPOWERS_PLUGIN" ;;
+        context-mode)      plugin_installed "$CONTEXT_MODE_PLUGIN" ;;
+        caveman)           caveman_installed ;;
+        pocock)            pocock_installed ;;
+        code-review-graph) crg_installed ;;
+        token-savior)      ts_installed ;;
+        graphify)          have graphify ;;
+        claude-mem)        cm_installed ;;
+        *) return 1 ;;
+    esac
+}
+
+# graphify's MCP is OPTIONAL. `init` adds it by default because Claude Code is
+# the common case, but the CLI answers the same questions for zero standing
+# tokens, so being able to take the server back out per repo matters.
+wire_graphify() {
+    have claude || { c_bad "claude CLI not found"; return 1; }
+    local r; r="$(repo_root)" || { c_bad "not a git repository"; return 1; }
+    have graphify || { c_bad "graphify not installed — agent-tools install-machine"; return 1; }
+    if claude mcp list 2>/dev/null | grep -q "^graphify"; then
+        c_ok "graphify MCP already wired here"; return 0
+    fi
+    local gmcp; gmcp="$(command -v graphify-mcp 2>/dev/null)"
+    [ -n "$gmcp" ] || { c_bad "graphify-mcp not found — reinstall with the [mcp] extra"; return 1; }
+    ( cd "$r" && claude mcp add graphify -s local -- "$gmcp" >/dev/null 2>&1 ) \
+        && c_ok "graphify MCP wired (10 tools, ~1.5k tokens every session)" \
+        || { c_bad "claude mcp add failed"; return 1; }
+}
+unwire_graphify() {
+    have claude || { c_bad "claude CLI not found"; return 1; }
+    claude mcp remove graphify -s local >/dev/null 2>&1 \
+        && c_ok "graphify MCP removed from this project" \
+        || c_warn "graphify MCP was not wired here"
+    c_ok "the CLI still works: graphify query \"...\"  (and costs nothing per session)"
 }
 
 wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
     local action="$1" name="${2:-}"
     local t; t="$(resolve_tool "$name")" || {
-        c_bad "usage: agent-tools $action <code-review-graph|token-savior>"; return 2; }
+        c_bad "usage: agent-tools $action <graphify|code-review-graph|token-savior>"; return 2; }
     case "$t:$action" in
         code-review-graph:wire)   wire_crg ;;
         code-review-graph:unwire) unwire_crg ;;
         token-savior:wire)        wire_ts ;;
         token-savior:unwire)      unwire_ts ;;
-        *) c_bad "$t has no per-project MCP entry — it is a $( [ "$t" = rtk ] && echo hook || echo plugin )"
-           c_warn "use: agent-tools install $t --project"; return 2 ;;
+        graphify:wire)            wire_graphify ;;
+        graphify:unwire)          unwire_graphify ;;
+        *) case "$t" in
+             rtk) c_bad "rtk has no per-project MCP entry — it is a hook"
+                  c_warn "confine it to this repo: agent-tools install rtk --project" ;;
+             caveman|pocock)
+                  c_bad "$t has no per-project MCP entry — it is a skill pack"
+                  c_warn "skills are always machine-wide: agent-tools install $t" ;;
+             *)   c_bad "$t has no per-project MCP entry — it is a plugin"
+                  c_warn "confine it to this repo: agent-tools install $t --project" ;;
+           esac
+           return 2 ;;
     esac
 }
 
@@ -1688,8 +2562,7 @@ wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
 #   graphify    MUST be reinstalled with extras + the mcp<2 pin re-specified,
 #               or you silently lose the gemini backend / the MCP server.
 #   claude-mem  its own installer; the worker must be restarted afterwards.
-#   agentmemory npm global, then the service restarted or you keep running the
-#               old binary.
+
 #   caveman     re-run from GitHub (unpinned) + update the global skills.
 #   self        git pull + install.sh in the Agent-Tools checkout.
 # ---------------------------------------------------------------------------
@@ -1726,16 +2599,6 @@ update_cmd() {
                     && c_ok "worker restarted" \
                     || c_warn "start the worker yourself: npx claude-mem start"
             else c_warn "needs Node >= $NODE_MIN — skipping"; fi ;;
-          agentmemory)
-            if node_ok; then
-                npm install -g @agentmemory/agentmemory@latest >/dev/null 2>&1 \
-                    && c_ok "agentmemory updated" || c_bad "agentmemory update failed"
-                # The old binary keeps running until the service restarts.
-                # (svc_stop/svc_start, not a restart helper -- there isn't one.)
-                svc_stop >/dev/null 2>&1
-                if svc_start >/dev/null 2>&1; then c_ok "service restarted"
-                else c_warn "restart the service yourself: $(svc_describe)"; fi
-            else c_warn "needs Node >= $NODE_MIN — skipping"; fi ;;
           none) c_warn "no memory backend selected" ;;
         esac
     fi
@@ -1743,6 +2606,11 @@ update_cmd() {
     if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = caveman ]; then
         caveman_installed && { hdr "caveman"; caveman_cmd update; } \
             || { [ "$what" = caveman ] && c_warn "caveman not installed — agent-tools install caveman"; }
+    fi
+
+    if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = pocock ]; then
+        if pocock_installed; then hdr "pocock"; pocock_cmd update
+        elif [ "$what" = pocock ]; then c_warn "pocock skills not installed — agent-tools install pocock"; fi
     fi
 
     if [ "$what" = all ] || [ "$what" = tools ] || [ "$what" = rtk ]; then
@@ -1764,7 +2632,7 @@ update_cmd() {
         if crg_installed; then
             hdr "code-review-graph"
             uv tool upgrade "$CRG_PKG" >/dev/null 2>&1 \
-                && c_ok "code-review-graph $(code-review-graph --version 2>/dev/null | awk '{print $2}')" \
+                && c_ok "code-review-graph $(uv_tool_version "$CRG_PKG")" \
                 || c_warn "update failed"
             # Its graph is keyed to the parser version, so a version bump can
             # leave a graph the new binary disagrees with. Cheap to redo: no LLM.
@@ -1786,13 +2654,48 @@ update_cmd() {
     if [ "$what" = all ] || [ "$what" = self ]; then
         hdr "agent-tools itself"
         local src; src="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+        # Running from ~/.local/bin is the NORMAL case, not the exception.
+        if [ ! -d "$src/.git" ]; then
+            local rec; rec="$(recorded_source 2>/dev/null)"
+            [ -n "$rec" ] && [ -d "$rec/.git" ] && src="$rec"
+        fi
         if [ -d "$src/.git" ]; then
-            ( cd "$src" && git pull --ff-only >/dev/null 2>&1 && ./install.sh >/dev/null 2>&1 ) \
-                && c_ok "agent-tools updated from $src" \
-                || c_warn "could not update in place — cd $src && git pull && ./install.sh"
+            # A checkout with no remote (someone unzipped an archive and ran
+            # git init) cannot pull. Point it at the public repo once.
+            if ! git -C "$src" remote get-url origin >/dev/null 2>&1; then
+                c_warn "$src has no 'origin' remote — add one to pull updates:"
+                echo "        git -C \"$src\" remote add origin $REPO_URL"
+            elif ( cd "$src" && git pull --ff-only >/dev/null 2>&1 ); then
+                ( cd "$src" && ./install.sh >/dev/null 2>&1 ) \
+                    && c_ok "updated from $REPO_URL -> $src" \
+                    || c_warn "pulled, but install.sh failed — run it yourself in $src"
+            else
+                c_warn "could not fast-forward $src (local commits, or a dirty tree)"
+                echo "        cd \"$src\" && git status    # then pull and ./install.sh"
+            fi
         else
-            c_warn "not running from a git checkout; update manually:"
-            echo "        cd /path/to/Agent-Tools && git pull && ./install.sh"
+            # No checkout at all: fetch one. This is the path for anyone who
+            # installed from a downloaded archive rather than a clone.
+            c_warn "no git checkout recorded — this copy came from an archive"
+            if ! have git; then
+                c_bad "git is not installed; download the latest manually:"
+                echo "        $REPO_URL"
+                return 1
+            fi
+            local dest="$HOME/.local/share/agent-tools-src"
+            if confirm "a clone of $REPO_URL into $dest (then install from it)"; then
+                rm -rf "$dest" 2>/dev/null
+                if git clone --depth 1 "$REPO_URL" "$dest" >/dev/null 2>&1 \
+                   && ( cd "$dest" && ./install.sh >/dev/null 2>&1 ); then
+                    c_ok "cloned and installed from $REPO_URL"
+                    c_ok "future updates: agent-tools update self"
+                else
+                    c_bad "clone or install failed — do it by hand:"
+                    echo "        git clone $REPO_URL && cd AgentTools && ./install.sh"
+                fi
+            else
+                echo "        git clone $REPO_URL && cd AgentTools && ./install.sh"
+            fi
         fi
     fi
 
@@ -1843,17 +2746,20 @@ migrate_paths() {                      # prints HOME-relative paths that exist
 }
 
 migrate_stop_memory() {
-    case "$MEMORY_BACKEND" in
-      claude-mem)  have npx && npx claude-mem stop >/dev/null 2>&1 ;;
-      agentmemory) svc_stop >/dev/null 2>&1 ;;
-    esac
+    [ "$MEMORY_BACKEND" = claude-mem ] && have npx && npx claude-mem stop >/dev/null 2>&1
+    # A legacy agentmemory store is still archived by migrate_paths, and its
+    # engine overwrites the session index mid-copy if it is left running. We do
+    # not manage that server any more, but we will not corrupt its data either.
+    if am_legacy_active; then
+        c_warn "a legacy agentmemory is running — stopping it so its store copies cleanly"
+        am_legacy_stop_service
+    fi
+    return 0
 }
 
 migrate_start_memory() {
-    case "$MEMORY_BACKEND" in
-      claude-mem)  have npx && npx claude-mem start >/dev/null 2>&1 ;;
-      agentmemory) svc_start >/dev/null 2>&1 ;;
-    esac
+    [ "$MEMORY_BACKEND" = claude-mem ] && have npx && npx claude-mem start >/dev/null 2>&1
+    return 0
 }
 
 migrate_cmd() {
@@ -1911,6 +2817,8 @@ migrate_cmd() {
         c_ok "wrote $file ($(du -h "$file" 2>/dev/null | cut -f1))"
         echo
         c_warn "NOT included (reinstall instead): plugin and uv-tool BINARIES,"
+        # Prose for a human, not a path this script resolves.
+        # shellcheck disable=SC2088
         c_warn "~/.local/bin, ~/.agents/skills, shell-snapshots, session-env, caches."
         c_warn "Their DATA is included: context-mode sessions, token-savior's store,"
         c_warn "rtk's savings history, and every @import your global CLAUDE.md pulls in."
@@ -1955,17 +2863,17 @@ migrate_cmd() {
 
 install_machine() {
     hdr "Platform: $PLATFORM"
-    [ "$PLATFORM" = windows ] && c_warn "native Windows: graphify only. For agentmemory use WSL2 (upstream)."
+    [ "$PLATFORM" = windows ] && c_warn "native Windows: everything but rtk installs here (rtk needs Rust or the release zip)."
     if [ "$PLATFORM" = macos ] && ! have brew; then c_bad "install Homebrew first: https://brew.sh"; exit 1; fi
 
     hdr "1. Prerequisites"
     if node_ok; then c_ok "node $(node -v)"
     elif have_native node; then
-        c_bad "node $(node -v) is too old — agentmemory needs >= $NODE_MIN"
+        c_bad "node $(node -v) is too old — need >= $NODE_MIN"
         if confirm "a modern Node from NodeSource (adds their apt repo)"; then
             install_node_modern && c_ok "node $(node -v)" || c_warn "NodeSource failed — use nvm or fnm"
         fi
-    elif confirm "Node.js (required for agentmemory; graphify works without it)"; then
+    elif confirm "Node.js (required for claude-mem and the npm tools; graphify works without it)"; then
         install_node && c_ok "node $(node -v)" || c_warn "node install did not succeed"
     fi
     if have uv; then c_ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
@@ -2011,15 +2919,11 @@ install_machine() {
         hdr "3. memory backend: claude-mem"
         # Loud warning rather than a block: the user may deliberately keep the
         # other installed but inactive. Two ACTIVE capturers is the problem.
-        if am_installed; then
-            c_bad "agentmemory is ALSO installed. Do not run both capturing at once:"
+        if am_legacy_active; then
+            c_bad "a LEGACY agentmemory is still capturing. Do not run both at once:"
             c_bad "  every tool call would fire two hook sets into two stores."
-            c_warn "Stop agentmemory's capture before using claude-mem:"
-            c_warn "    claude plugin uninstall agentmemory@agentmemory"
-            case "$PLATFORM" in
-              macos) c_warn "    launchctl bootout gui/\$(id -u)/$SERVICE_LABEL" ;;
-              linux|wsl) c_warn "    systemctl --user disable --now agentmemory" ;;
-            esac
+            c_warn "Retire it first (keeps the data, moves it into claude-mem):"
+            c_warn "    agent-tools memory migrate-from-agentmemory"
         fi
         if cm_installed; then c_ok "claude-mem present"
         elif ! have npm; then c_warn "npm missing — cannot install claude-mem"
@@ -2037,84 +2941,16 @@ install_machine() {
         return
     fi
 
-    # ---- agentmemory path ------------------------------------------------
-    if cm_installed; then
-        c_bad "claude-mem is ALSO installed. Two active capturers is the problem:"
-        c_bad "  every tool call fires two hook sets into two stores."
-        c_warn "Remove one before continuing:  npx claude-mem uninstall"
-    fi
-    remember_backend agentmemory
-
-    # Two different reasons to skip, two different messages — sharing one text
-    # printed "use WSL2" on a Linux box, which is nonsense.
-    if [ "$PLATFORM" = windows ]; then
-        hdr "3. agentmemory — SKIPPED"
-        c_warn "native Windows: upstream ships no engine installer here and"
-        c_warn "\`agentmemory connect\` is unsupported. Use WSL2 and re-run there."
-        return
-    fi
-    if [ "$PLATFORM" = wsl ] && have npm && ! have_native npm; then
-        hdr "3. agentmemory — SKIPPED"
-        c_bad "npm here is the WINDOWS one: $(where_is npm)"
-        c_warn "Installing through it would put agentmemory in the Windows npm"
-        c_warn "prefix, and the Linux service would fail while looking fine."
-        c_warn "Install Node INSIDE WSL first, then re-run:"
-        c_warn "    sudo apt-get install -y nodejs npm"
-        return
-    fi
-    if have_native node && ! node_ok; then
-        hdr "3. agentmemory — SKIPPED"
-        c_bad "node $(node -v) < $NODE_MIN — installing here yields a crash-looping service."
-        c_warn "Get Node >= $NODE_MIN, then re-run:"
-        c_warn "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs"
-        return
-    fi
-    if ! have_native npm; then
-        hdr "3. agentmemory — SKIPPED"
-        c_warn "npm not available, so agentmemory cannot be installed."
-        c_warn "Install Node 18+ and re-run 'agent-tools install-machine'."
-        c_warn "graphify above is fully set up and works without it."
-        return
-    fi
-
-    hdr "3. agentmemory"
-    if have_native agentmemory; then c_ok "agentmemory $(agentmemory --version 2>/dev/null | head -1)"
-    elif confirm "agentmemory (persistent memory across sessions)"; then
-        npm install -g @agentmemory/agentmemory >/dev/null 2>&1
-        have agentmemory && c_ok "agentmemory installed" || c_bad "agentmemory install failed"
-    else
-        c_warn "skipped — graphify above is fully set up and works without it"
-        return
-    fi
-    # A store copied from another OS carries an unusable engine binary.
-    if [ -f "$AM/bin/iii" ] && have file && ! file "$AM/bin/iii" 2>/dev/null | grep -qE "Mach-O|ELF"; then
-        mkdir -p "$AM/.foreign"; mv "$AM/bin/iii" "$AM/.foreign/" 2>/dev/null
-        c_warn "moved foreign iii binary aside; it will re-download"
-    fi
-    rm -f "$AM/iii.pid" "$AM/worker.pid" "$AM/engine-state.json" 2>/dev/null
-
-    hdr "4. Memory server"
-    svc_install; local rc=$?
-    case $rc in
-        0) c_ok "service installed and started — $(svc_describe)" ;;
-        2) c_warn "no systemd here. Start manually (LAW: from $AM, or you get an empty store):"
-           echo "        cd $AM && agentmemory --tools core &" ;;
-        3) c_warn "no service manager for this platform" ;;
-    esac
-
-    hdr "5. Claude Code plugin (the hooks that capture memory)"
-    if have claude; then
-        if claude plugin list 2>/dev/null | grep -q agentmemory; then c_ok "agentmemory plugin present"
-        elif confirm "the agentmemory Claude Code plugin (the hooks that capture memory)"; then
-            claude plugin marketplace add rohitg00/agentmemory >/dev/null 2>&1
-            claude plugin install agentmemory@agentmemory >/dev/null 2>&1 && c_ok "agentmemory plugin installed"
-        fi
-    else c_warn "claude CLI not found — install it, then re-run"; fi
-
+    # No other backend exists. `--memory=none` falls through to here so the
+    # optional tools still get installed; a machine with no memory backend is a
+    # supported choice, not an error.
+    hdr "3. memory backend: none"
+    c_warn "no session capture (--memory=none). Switch on later with:"
+    c_warn "    agent-tools memory switch claude-mem"
+    remember_backend none
     install_extras
     hdr "Next"
     echo "  cd <your-project> && agent-tools init"
-    echo "  MANUAL: memory data does not migrate. See 'agent-tools help'."
 }
 
 # ---------------------------------------------------------------------------
@@ -2235,30 +3071,42 @@ HK
         c_ok "post-checkout hook installed (DISABLED by default)"
     else c_ok "post-checkout hook already present"; fi
 
-    if have claude; then
+    if [ "$ADD_MCP" != 1 ]; then
+        # DEFAULT since 3.4.0: no server. Nothing is re-sent every session; the
+        # instruction block below tells the agent which commands to run
+        # instead. This is also the mode that works identically in Codex,
+        # Antigravity and every other host, none of which read Claude Code's
+        # MCP config.
+        #
+        # LAW: an already-wired repo is LEFT ALONE. `init` is idempotent and
+        # re-run routinely to pick up new hooks; having it silently tear out a
+        # server someone deliberately added would make a maintenance command
+        # destructive.
+        if have claude && claude mcp list 2>/dev/null | grep -q "^graphify"; then
+            c_ok "graphify MCP already wired here — left as-is"
+            echo "        remove it with:  agent-tools unwire graphify"
+        else
+            c_ok "no MCP server wired (default — 0 standing tokens)"
+            echo "        the agent uses the CLI:  graphify query \"...\""
+            echo "        want the server here?    agent-tools init --add-mcp"
+        fi
+    elif have claude; then
         local gmcp; gmcp="$(command -v graphify-mcp || echo "$BIN/graphify-mcp")"
         claude mcp list 2>/dev/null | grep -q "^graphify" \
             && c_ok "graphify MCP already wired" \
             || { claude mcp add graphify -s local -- "$gmcp" >/dev/null 2>&1 && c_ok "graphify MCP wired (10 tools, ~1.5k tokens)"; }
-        # Wire the MCP for the SELECTED backend only. claude-mem registers its
-        # own MCP during `claude-mem install`, so we must not add a second
-        # entry; agentmemory needs one pointed at its server.
-        case "$MEMORY_BACKEND" in
-          agentmemory)
-            if [ "$PLATFORM" != windows ]; then
-                claude mcp list 2>/dev/null | grep -q "^agentmemory" \
-                    && c_ok "agentmemory MCP already wired" \
-                    || { claude mcp add agentmemory -s local -e AGENTMEMORY_URL=http://localhost:3111 -- npx -y @agentmemory/mcp >/dev/null 2>&1 && c_ok "agentmemory MCP wired (8 tools, ~1k tokens)"; }
-            fi ;;
-          claude-mem)
+        # claude-mem registers its own MCP during `claude-mem install`, so we
+        # must not add a second entry.
+        if [ "$MEMORY_BACKEND" = claude-mem ]; then
             c_ok "claude-mem wires its own MCP (nothing to add here)"
-            # A leftover entry from a previous backend would keep a dead server
-            # in every session's tool list.
+            # A leftover entry from the agentmemory era would keep a dead
+            # server in every session's tool list, costing schema tokens for
+            # tools that can never answer.
             if claude mcp list 2>/dev/null | grep -q "^agentmemory"; then
-                c_warn "an agentmemory MCP entry is still wired but the backend is claude-mem"
+                c_warn "a stale agentmemory MCP entry is wired to a server nothing starts"
                 c_warn "    claude mcp remove agentmemory -s local"
-            fi ;;
-        esac
+            fi
+        fi
     fi
 
     # The backend choice is machine-wide (~/.config/agent-tools/config), not
@@ -2565,18 +3413,13 @@ obsidian_export() {
 
     if [ "$mode" != "--graph-only" ]; then
         # A vault with only the graph is half a second brain: structure without
-        # the reasoning behind it. Both backends export, so neither leaves the
-        # vault one-sided.
+        # the reasoning behind it.
         if [ "$MEMORY_BACKEND" = claude-mem ]; then
             # Reads ~/.claude-mem/claude-mem.db read-only; the worker need not
             # be running, and an export can never mutate the live store.
             memory_export "$vault/memories" >/dev/null 2>&1 \
               && { c_ok "memories -> $vault/memories ($(find "$vault/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"; did_mem=1; } \
               || c_warn "claude-mem export failed (no store at ~/.claude-mem yet?)"
-        elif [ "$MEMORY_BACKEND" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
-            memory_export "$vault/memories" >/dev/null 2>&1 \
-              && { c_ok "memories -> $vault/memories ($(find "$vault/memories" -name '*.md' 2>/dev/null | wc -l | tr -d ' ') notes)"; did_mem=1; } \
-              || c_warn "memory export failed"
         else
             c_warn "memory backend not reachable — skipping memories"
         fi
@@ -2598,18 +3441,17 @@ obsidian_export() {
 # ---------------------------------------------------------------------------
 # Memory backend management.
 #
-# Switching is SYSTEM-WIDE, not per project: both backends hook the session
-# lifecycle at user scope and keep one machine-global store. A per-project
-# split would fragment your history and require both to stay installed and
-# hooked — the exact thing we warn against.
+# Switching is SYSTEM-WIDE, not per project: a backend hooks the session
+# lifecycle at user scope and keeps one machine-global store. A per-project
+# split would fragment your history.
 #
-# The switch is ASYMMETRIC, and pretending otherwise would be dishonest:
-#   claude-mem -> agentmemory   memories can be POSTed to /agentmemory/remember
-#   agentmemory -> claude-mem   claude-mem has NO ingest API; only its own hooks
-#                               write. So we export to Markdown (portable, and
-#                               what an Obsidian vault wants) and point at the
-#                               transcript-replay script. Memories are NOT
-#                               silently recreated inside claude-mem.
+# Since 3.3.0 there are two settings, claude-mem and none, so `switch` is
+# really "capture, or do not". The interesting path is the one-way door out of
+# the removed agentmemory backend, which lives in
+# memory_migrate_from_agentmemory below: claude-mem has NO ingest API, only its
+# own hooks write, so memories cannot simply be POSTed across. We export to
+# Markdown (portable, and what an Obsidian vault wants) and then feed
+# claude-mem through its own pipeline. Nothing is silently recreated.
 # ---------------------------------------------------------------------------
 memory_dir_default() { printf '%s' "$(pwd)/memory-export-$(date +%Y%m%d)"; }
 
@@ -2623,8 +3465,11 @@ memory_export() {
     local here; here="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")"
     [ -n "$PY" ] || { c_bad "no working python"; return 1; }
 
-    local name="memory-export.py"
-    [ "$MEMORY_BACKEND" = claude-mem ] && name="claude-mem-export.py"
+    # claude-mem-export.py reads ~/.claude-mem SQLite. memory-export.py talks
+    # to a legacy agentmemory server over HTTP -- only reachable while one is
+    # still running, which is exactly the migration case.
+    local name="claude-mem-export.py"
+    [ "$MEMORY_BACKEND" = claude-mem ] || name="memory-export.py"
 
     local script="$here/$name"
     [ -f "$script" ] || script="$(dirname "$0")/scripts/$name"
@@ -2637,17 +3482,22 @@ memory_export() {
     fi
 }
 
-memory_stop_agentmemory() {
-    # Stop AND disable, so a backend nothing writes to is not left supervised.
-    # The STORE is never deleted — switching back must stay possible.
+# Stop AND disable a legacy agentmemory service, so a backend nothing writes to
+# is not left supervised. The STORE is never deleted.
+am_legacy_stop_service() {
     case "$PLATFORM" in
         macos)
-            launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" 2>/dev/null
-            [ -f "$PLIST" ] && { mv "$PLIST" "$PLIST.disabled" 2>/dev/null && c_ok "launchd job disabled (plist kept as .disabled)"; } ;;
+            launchctl bootout "gui/$(id -u)/$AM_LEGACY_LABEL" 2>/dev/null
+            [ -f "$AM_LEGACY_PLIST" ] && { mv "$AM_LEGACY_PLIST" "$AM_LEGACY_PLIST.disabled" 2>/dev/null \
+                && c_ok "launchd job disabled (plist kept as .disabled)"; } ;;
         linux|wsl)
-            has_systemd && { systemctl --user disable --now agentmemory.service 2>/dev/null && c_ok "systemd unit disabled"; } ;;
+            has_systemd && { systemctl --user disable --now agentmemory.service 2>/dev/null \
+                && c_ok "systemd unit disabled"; }
+            [ -f "$AM_LEGACY_UNIT" ] && { mv "$AM_LEGACY_UNIT" "$AM_LEGACY_UNIT.disabled" 2>/dev/null \
+                && c_ok "systemd unit file kept as .disabled"; } ;;
     esac
-    ( cd "$AM" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
+    # LAW (historical): the server must be stopped from its own directory.
+    ( cd "$AM_LEGACY" 2>/dev/null && agentmemory stop --force >/dev/null 2>&1 )
     if have claude && claude plugin list 2>/dev/null | grep -q "agentmemory@agentmemory"; then
         # `uninstall` FAILS when the plugin is enabled at PROJECT scope (it lives
         # in a repo's .claude/settings.json, shared with the team). Disabling at
@@ -2665,14 +3515,91 @@ memory_stop_agentmemory() {
             c_warn "    claude plugin disable agentmemory@agentmemory --scope local"
         fi
     fi
-    c_ok "agentmemory store preserved at $AM (nothing deleted)"
+    if claude mcp list 2>/dev/null | grep -q "^agentmemory"; then
+        claude mcp remove agentmemory -s local >/dev/null 2>&1 \
+            && c_ok "stale agentmemory MCP entry removed" \
+            || c_warn "remove the MCP entry yourself: claude mcp remove agentmemory -s local"
+    fi
+    c_ok "agentmemory store preserved at $AM_LEGACY (nothing deleted)"
+}
+
+# ---------------------------------------------------------------------------
+# The one-way door out of the removed agentmemory backend.
+#
+# THIS IS DESTRUCTIVE TO THE SERVICE, NOT TO THE DATA. It stops and disables a
+# supervised agentmemory, disables its plugin hooks, removes its MCP entry, and
+# imports what it can into claude-mem. ~/.agentmemory is left byte-for-byte
+# intact, and a Markdown export is written first so there is a record that
+# outlives both tools.
+# ---------------------------------------------------------------------------
+memory_migrate_from_agentmemory() {
+    hdr "Migrating off agentmemory (removed in 3.3.0)"
+    if ! am_legacy_installed; then
+        c_ok "no agentmemory install found at $AM_LEGACY — nothing to migrate"
+        return 0
+    fi
+    c_warn "This stops and disables the agentmemory service and its Claude Code"
+    c_warn "hooks. Your store at $AM_LEGACY is NOT deleted."
+    confirm "to migrate off agentmemory now" || { c_warn "aborted — nothing changed"; return 0; }
+
+    # 1. Export first. The exact record, before anything is touched.
+    hdr "1/3 export the agentmemory store"
+    local out; out="$HOME/agentmemory-export-$(date +%Y%m%d)"
+    if curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
+        MEMORY_BACKEND=agentmemory memory_export "$out" >/dev/null 2>&1 \
+            && c_ok "exported to $out" \
+            || c_warn "export failed — the store at $AM_LEGACY is still intact"
+    else
+        c_warn "server not responding on :3111, so there is nothing to export over HTTP."
+        c_warn "Start it once to export:  cd $AM_LEGACY && agentmemory --tools core &"
+    fi
+
+    # 2. Import through claude-mem's own pipeline.
+    hdr "2/3 import into claude-mem"
+    local conv; conv="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")/agentmemory-to-claude-mem.py"
+    [ -f "$conv" ] || conv="$(dirname "$0")/scripts/agentmemory-to-claude-mem.py"
+    if [ -f "$conv" ] && [ -n "$PY" ]; then
+        c_warn "claude-mem has no ingest API. Converting via its own hook pipeline"
+        c_warn "(it SUMMARISES on ingest, so text is compressed, not verbatim —"
+        c_warn " the Markdown export above stays the exact record)."
+        "$PY" "$conv" --cwd "$(pwd)" --dry-run 2>&1 | sed 's/^/    /'
+        if confirm "the converted memories into claude-mem now"; then
+            "$PY" "$conv" --cwd "$(pwd)" --go 2>&1 | sed 's/^/    /'
+        else
+            c_warn "skipped — run later:  $conv --go"
+        fi
+    else
+        c_warn "converter not found; your Markdown export is the record"
+    fi
+    c_warn "To also replay raw past sessions (optional, costs tokens):"
+    c_warn "    scripts/claude-mem-import-transcripts.sh   # dry run first"
+
+    # 3. Retire the service.
+    hdr "3/3 retire the agentmemory service"
+    am_legacy_stop_service
+    if [ "$MEMORY_BACKEND" != claude-mem ]; then
+        if cm_installed; then c_ok "claude-mem already installed"
+        elif confirm "claude-mem (so something is still capturing)"; then
+            npx -y claude-mem install >/dev/null 2>&1 \
+              && c_ok "claude-mem installed (wires its own hooks + MCP)" \
+              || c_bad "install failed — try: npx claude-mem install"
+        fi
+        remember_backend claude-mem
+    fi
+    c_ok "done — backend is claude-mem, agentmemory data preserved"
+    echo "  Restart Claude Code so hook changes take effect."
 }
 
 memory_switch() {
     local target="${1:-}"
     case "$target" in
-        claude-mem|agentmemory) ;;
-        *) c_bad "usage: agent-tools memory switch <claude-mem|agentmemory>"; return 2 ;;
+        claude-mem|none) ;;
+        agentmemory)
+            c_bad "agentmemory was removed in 3.3.0 and cannot be switched back on."
+            c_warn "To move an existing store into claude-mem:"
+            c_warn "    agent-tools memory migrate-from-agentmemory"
+            return 2 ;;
+        *) c_bad "usage: agent-tools memory switch <claude-mem|none>"; return 2 ;;
     esac
     local current="$MEMORY_BACKEND"
     [ "$current" = "$target" ] && { c_ok "already using $target"; return 0; }
@@ -2680,56 +3607,34 @@ memory_switch() {
     hdr "Switching memory backend: $current -> $target"
     c_warn "This is machine-wide. Memory spans projects, so it cannot be per-project."
 
-    # 1. Always export first — a portable record that outlives either tool.
-    if [ "$current" = agentmemory ] && curl -sf -m 5 http://localhost:3111/agentmemory/health >/dev/null 2>&1; then
-        local out="$HOME/agentmemory-export-$(date +%Y%m%d)"
-        hdr "1/3 export current memories"
-        memory_export "$out" && c_ok "exported to $out"
+    # Always export first — a portable record that outlives either setting.
+    hdr "1/2 export current memories"
+    if [ "$current" = claude-mem ] && cm_installed; then
+        local out; out="$HOME/claude-mem-export-$(date +%Y%m%d)"
+        memory_export "$out" >/dev/null 2>&1 && c_ok "exported to $out" \
+            || c_warn "export failed (no store at ~/.claude-mem yet?)"
     else
-        hdr "1/3 export current memories"
-        c_warn "nothing to export (source backend not reachable)"
+        c_warn "nothing to export (no active backend)"
     fi
 
-    # 2. Import where an API exists; be explicit where none does.
-    hdr "2/3 import into $target"
-    if [ "$target" = agentmemory ]; then
-        c_warn "claude-mem -> agentmemory: memories can be POSTed to /agentmemory/remember."
-        c_warn "Run this after agentmemory is up, against the exported notes."
-    else
-        # claude-mem has no ingest API, so we go through its own pipeline:
-        # synthesise a transcript containing the memories and hand it to the
-        # Stop hook. It then summarises and embeds them natively, which is the
-        # only way they end up searchable rather than half-imported.
-        local conv; conv="$(dirname "$(command -v agent-tools 2>/dev/null || echo "$0")")/agentmemory-to-claude-mem.py"
-        [ -f "$conv" ] || conv="$(dirname "$0")/scripts/agentmemory-to-claude-mem.py"
-        if [ -f "$conv" ] && [ -n "$PY" ]; then
-            c_warn "claude-mem has no ingest API. Converting via its own hook pipeline"
-            c_warn "(it SUMMARISES on ingest, so text is compressed, not verbatim —"
-            c_warn " the Markdown export above stays the exact record)."
-            "$PY" "$conv" --cwd "$(pwd)" --dry-run 2>&1 | sed 's/^/    /'
-            if confirm "the converted memories into claude-mem now"; then
-                "$PY" "$conv" --cwd "$(pwd)" --go 2>&1 | sed 's/^/    /'
-            else
-                c_warn "skipped — run later:  $conv --go"
-            fi
-        else
-            c_warn "converter not found; your Markdown export is the record"
-        fi
-        c_warn "To also replay raw past sessions (optional, costs tokens):"
-        c_warn "    scripts/claude-mem-import-transcripts.sh   # dry run first"
-    fi
-
-    # 3. Disable the outgoing backend, install the incoming one.
-    hdr "3/3 switch over"
-    if [ "$current" = agentmemory ]; then memory_stop_agentmemory; fi
-    if [ "$target" = claude-mem ]; then
+    hdr "2/2 switch over"
+    case "$target" in
+      claude-mem)
         if cm_installed; then c_ok "claude-mem already installed"
         elif confirm "claude-mem"; then
             npx -y claude-mem install >/dev/null 2>&1 \
               && c_ok "claude-mem installed (wires its own hooks + MCP)" \
               || c_bad "install failed — try: npx claude-mem install"
-        fi
-    fi
+        fi ;;
+      none)
+        # Stop capture without uninstalling: the store stays readable and
+        # switching back costs nothing.
+        have npx && npx claude-mem stop >/dev/null 2>&1 \
+            && c_ok "claude-mem worker stopped (store kept at ~/.claude-mem)" \
+            || c_warn "stop the worker yourself: npx claude-mem stop"
+        c_warn "claude-mem's hooks are still installed. To remove them entirely:"
+        c_warn "    npx claude-mem uninstall" ;;
+    esac
     remember_backend "$target"
     c_ok "backend is now: $target"
     echo "  Restart Claude Code so hook changes take effect."
@@ -2775,10 +3680,72 @@ stop_cmd() {
     echo "  Completed files stay cached, so re-running resumes rather than restarting."
 }
 
+# ---------------------------------------------------------------------------
+# version — what you are running, when it was released, when it landed here.
+#
+# Three DIFFERENT dates, and conflating them is how "I already updated" turns
+# into an hour of confusion:
+#   released   the version's own release date, baked into the file
+#   installed  when install.sh last wrote the copy on your PATH
+#   source     the checkout's HEAD, which can be AHEAD of both if you pulled
+#              and forgot to re-run install.sh
+# ---------------------------------------------------------------------------
+
+# stat has no portable format string: BSD/macOS uses -f, GNU uses -c.
+file_mtime() {
+    [ -e "$1" ] || return 1
+    stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$1" 2>/dev/null && return 0
+    stat -c '%y' "$1" 2>/dev/null | cut -d: -f1,2 && return 0
+    return 1
+}
+
+version_cmd() {
+    if [ "$SHORT_OUTPUT" = 1 ]; then printf '%s\n' "$VERSION"; return 0; fi
+
+    printf 'agent-tools %s   (released %s)\n' "$VERSION" "$VERSION_DATE"
+
+    # The file that is actually running. $0 for a direct call, whatever is on
+    # PATH otherwise -- report the one the user would get by typing the name.
+    local self; self="$(command -v agent-tools 2>/dev/null)"
+    [ -n "$self" ] || self="$0"
+    if [ -e "$self" ]; then
+        local when; when="$(file_mtime "$self")"
+        printf '  installed  %s\n' "${when:-unknown}"
+        printf '             %s\n' "$self"
+        # A copy on PATH that is OLDER than the checkout means install.sh was
+        # not re-run after a pull. Silent divergence, so say it.
+        local sv
+        sv="$(sed -n 's/^VERSION=//p' "$self" 2>/dev/null | head -1)"
+        if [ -n "$sv" ] && [ "$sv" != "$VERSION" ]; then
+            c_warn "the copy on your PATH is $sv, but this file is $VERSION"
+            c_warn "    re-run ./install.sh from the checkout"
+        fi
+    fi
+
+    local rec; rec="$(recorded_source 2>/dev/null)"
+    if [ -n "$rec" ] && [ -d "$rec/.git" ]; then
+        local head hdate
+        head="$(git -C "$rec" rev-parse --short HEAD 2>/dev/null)"
+        hdate="$(git -C "$rec" log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' 2>/dev/null)"
+        printf '  source     %s\n' "$rec"
+        [ -n "$head" ] && printf '             HEAD %s  (%s)\n' "$head" "${hdate:-unknown}"
+        if ! git -C "$rec" diff --quiet 2>/dev/null; then
+            c_warn "the checkout has uncommitted changes"
+        fi
+    elif [ -n "$rec" ]; then
+        c_warn "recorded checkout is gone: $rec"
+        c_warn "    re-run ./install.sh from wherever it lives now"
+    else
+        c_warn "no checkout recorded — run ./install.sh once from your clone"
+    fi
+    return 0
+}
+
 case "${1:-help}" in
     doctor)            doctor ;;
     install-machine)   install_machine ;;
     caveman)           shift; caveman_cmd "${1:-status}" ;;
+    pocock)            shift; pocock_cmd "${1:-status}" ;;
     tools)             tools_cmd ;;
     install)           shift; install_tool_cmd "$(first_nonflag "$@")" ;;
     uninstall|remove)  shift; uninstall_tool_cmd "$(first_nonflag "$@")" ;;
@@ -2788,20 +3755,36 @@ case "${1:-help}" in
     migrate)           shift; migrate_cmd "${1:-}" "${2:-}" ;;
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;
-    status)            status_cmd ;;
+    status)            shift
+                       case "${1:-}" in
+                         refresh) status_cmd ;;
+                         *) inventory_cmd
+                            # The refresh view only means anything inside a
+                            # repo, so show it when we are in one and stay
+                            # quiet rather than erroring when we are not.
+                            if [ -n "$(repo_root)" ]; then echo; status_cmd; fi ;;
+                       esac ;;
+    inventory|list)    inventory_cmd ;;
+    agents)            agents_cmd ;;
     obsidian)          shift; obsidian_export "${1:-}" "${2:-both}" ;;
     memory)            shift
                        case "${1:-status}" in
                          export) shift; memory_export "${1:-}" ;;
                          switch) shift; memory_switch "${1:-}" ;;
+                         migrate-from-agentmemory) memory_migrate_from_agentmemory ;;
                          status) echo "  backend: $MEMORY_BACKEND"
                                  cm_installed && echo "  claude-mem : installed" || echo "  claude-mem : not installed"
-                                 am_installed && echo "  agentmemory: installed" || echo "  agentmemory: not installed" ;;
-                         *) echo "usage: agent-tools memory <status|export|switch>"; exit 2 ;;
+                                 if am_legacy_installed; then
+                                     am_legacy_active \
+                                       && echo "  agentmemory: LEGACY, still capturing — agent-tools memory migrate-from-agentmemory" \
+                                       || echo "  agentmemory: legacy install present, inactive (removed in 3.3.0)"
+                                 fi ;;
+                         *) echo "usage: agent-tools memory <status|export|switch|migrate-from-agentmemory>"; exit 2 ;;
                        esac ;;
     stop)              stop_cmd ;;
     platform)          echo "$PLATFORM" ;;   # used by the self-test
     help|--help|-h)    usage; long_help ;;
-    version|--version) echo "agent-tools $VERSION" ;;
+    version)           version_cmd ;;
+    --version)         echo "agent-tools $VERSION" ;;
     *) usage; exit 2 ;;
 esac

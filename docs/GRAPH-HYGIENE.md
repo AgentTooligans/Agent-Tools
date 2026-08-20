@@ -1,4 +1,12 @@
-# Graph hygiene — keeping a knowledge graph honest
+# Keeping a knowledge graph honest
+
+Everything on this page was learned by thoroughly breaking a real graph —
+14,647 nodes — and then working out how to put it back together.
+
+A knowledge graph is only useful while it reflects your code. The awkward part
+is that a stale or duplicated graph doesn't announce itself; it just quietly
+starts giving worse answers. This is what we learned about spotting that and
+preventing it.
 
 Everything here was learned by breaking a real 14,647-node graph and fixing it
 (2026-07-29, `a data-generator project`). The specifics of that repo do not

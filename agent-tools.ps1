@@ -7,12 +7,13 @@
   with the same commands, translating your current directory into the path the
   Linux side expects.
 
-  It prefers WSL, because that is the only environment where EVERY tool works:
-  agentmemory upstream ships no engine installer for native Windows and
-  `agentmemory connect` is unsupported there. If WSL is not present it falls
-  back to Git Bash, where graphify, code-review-graph, token-savior,
-  superpowers and context-mode all work; agentmemory does not, and rtk needs
-  either Rust (`cargo install --git`) or the release zip on PATH.
+  It prefers WSL because that is the smoother environment, but since
+  agent-tools 3.3.0 it is no longer required. The agentmemory backend that had
+  no native-Windows installer was removed; claude-mem, graphify,
+  code-review-graph, token-savior, superpowers, context-mode and the skill
+  packs (caveman, pocock) all work under Git Bash too. The one remaining gap
+  is rtk, which needs either Rust (`cargo install --git`) or the release zip
+  on PATH.
 
 .EXAMPLE
   agent-tools doctor
@@ -20,7 +21,9 @@
   agent-tools refresh
   agent-tools tools
   agent-tools install rtk
+  agent-tools install pocock
   agent-tools update all
+  agent-tools update pocock
   agent-tools install-machine -y
 #>
 [CmdletBinding()]
@@ -95,7 +98,7 @@ Install it inside WSL:
 }
 
 # ---------------------------------------------------------------------------
-# Fallback: Git Bash (graphify only — agentmemory cannot install here)
+# Fallback: Git Bash. Everything but rtk installs here since 3.3.0.
 # ---------------------------------------------------------------------------
 $gitBash = @(
     "$env:ProgramFiles\Git\bin\bash.exe",
@@ -105,15 +108,26 @@ $gitBash = @(
 
 if ($gitBash) {
     Write-Host "  note: no WSL distro found — using Git Bash." -ForegroundColor Yellow
-    Write-Host "        graphify, code-review-graph, token-savior, superpowers and" -ForegroundColor Yellow
-    Write-Host "        context-mode work here. agentmemory needs WSL2; rtk needs" -ForegroundColor Yellow
-    Write-Host "        cargo or its release zip on PATH." -ForegroundColor Yellow
+    Write-Host "        graphify, claude-mem, code-review-graph, token-savior," -ForegroundColor Yellow
+    Write-Host "        superpowers, context-mode, caveman and pocock all work here." -ForegroundColor Yellow
+    Write-Host "        Only rtk needs more: cargo, or its release zip on PATH." -ForegroundColor Yellow
     # Git Bash understands C:\ paths but prefers /c/... ; it also accepts the
     # drive form, so just stay where we are.
     # Build the bash command by concatenation. Backtick-escaped quotes inside a
     # double-quoted PowerShell string are a parser trap — this form has no
     # escaping at all.
     $bashPrefix = 'export PATH="$HOME/.local/bin:$PATH"; '
+    # Probe before running, exactly as the WSL branch does. Without this an
+    # uninstalled tool surfaced as bash's raw "command not found" instead of
+    # the instructions Show-Missing already exists to print.
+    $probe = (& $gitBash -lc ($bashPrefix + "command -v agent-tools") 2>$null | Select-Object -First 1)
+    if (-not $probe) {
+        Show-Missing "Git Bash" @"
+Install it from Git Bash:
+      cd /path/to/Agent-Tools && ./install.sh
+"@
+        exit 1
+    }
     & $gitBash -lc ($bashPrefix + "agent-tools " + $argString)
     exit $LASTEXITCODE
 }

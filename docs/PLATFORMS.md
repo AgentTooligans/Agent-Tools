@@ -1,13 +1,25 @@
-# Platforms
+# Which platforms this works on
+
+Short answer: macOS, Linux, WSL2 and native Windows, and we've actually run it
+on all of them rather than assuming.
+
+Longer answer below, including the handful of places where a platform behaves
+differently enough that you should know about it before you get surprised —
+Windows symlinks and WSL filesystem boundaries being the two that bite hardest.
 
 | platform | support | service | verified |
 |---|---|---|---|
-| macOS | full | launchd user agent | ✅ macOS 15 (Apple Silicon) |
-| Linux | full | systemd `--user` | ✅ Ubuntu 24.04 container |
-| WSL2 | full | systemd `--user` | ✅ Windows 11 + Ubuntu 26.04, systemd on |
-| Windows native | everything except **agentmemory**; rtk needs cargo or a zip | none | ✅ Win 11 + Git Bash |
+| macOS | full | **none needed** | ✅ macOS 15 (Apple Silicon) |
+| Linux | full | **none needed** | ✅ Ubuntu 24.04 container |
+| WSL2 | full | **none needed** | ✅ Windows 11 + Ubuntu 26.04 |
+| Windows native | everything except **rtk**, which needs cargo or a zip | none | ✅ Win 11 + Git Bash |
 
 "Verified" means the tool was actually run there, not that it should work.
+
+**Since 3.3.0 nothing here installs a launchd plist or a systemd unit.** The
+agentmemory backend that needed supervising was removed; claude-mem runs its
+own worker with an absolute store path. That also closed the native-Windows
+gap — see [Windows native](#windows-native) below. Details: [SERVICES.md](SERVICES.md).
 
 ## Per tool
 
@@ -15,17 +27,32 @@
 |---|---|---|---|---|---|
 | graphify | ✅ | ✅ | ✅ | ✅ | uv |
 | claude-mem | ✅ | ✅ | ✅ | ✅ | npm |
-| agentmemory | ✅ | ✅ | ✅ | ❌ **upstream** | npm |
 | caveman | ✅ | ✅ | ✅ | ✅ | npx / skills |
+| pocock | ✅ | ✅ | ✅ | ✅ `--copy` | skills (`npx skills add`) |
 | rtk | ✅ brew | ✅ install.sh | ✅ install.sh | ⚠️ cargo or release zip | see below |
 | superpowers | ✅ | ✅ | ✅ | ✅ | claude plugin |
 | context-mode | ✅ | ✅ | ✅ | ✅ | claude plugin (Node ≥ 22.5) |
 | code-review-graph | ✅ | ✅ | ✅ | ✅ | uv |
 | token-savior | ✅ | ✅ | ✅ | ✅ | uv |
 
-Everything installed through **uv** or the **Claude plugin system** is
-platform-agnostic by construction. The two gaps are agentmemory (upstream ships
-no native-Windows engine) and rtk (below).
+Everything installed through **uv**, **npm/npx** or the **Claude plugin
+system** is platform-agnostic by construction. Since 3.3.0 there is exactly one
+gap left: rtk (below). The other one, agentmemory, was removed — it shipped no
+native-Windows engine installer, and that single fact is what kept this table
+saying "Windows: graphify only" for three minor versions.
+
+### The skill packs on native Windows
+
+`npx skills add` **symlinks** `~/.agents/skills/<skill>` into each agent's own
+skills directory. On Windows a symlink needs Administrator or Developer Mode,
+and on a filesystem without symlink support the install can look successful
+while leaving those directories empty.
+
+`agent-tools` therefore passes `--copy` when the platform is `windows`, which
+writes real files instead. Consequence worth knowing: copies do not track
+`~/.agents/skills`, so after `agent-tools update pocock` (or `caveman`) on
+Windows, re-run `agent-tools install <pack>` to refresh them. On macOS, Linux
+and WSL the symlinks make that unnecessary.
 
 ### rtk on native Windows
 
@@ -43,8 +70,8 @@ also install ripgrep: `winget install BurntSushi.ripgrep.MSVC`.
 
 ### context-mode and the Node floor
 
-context-mode needs **Node >= 22.5**, one major version above agentmemory's
-floor of 20. On older Node it installs cleanly and then every hook fails at
+context-mode needs **Node >= 22.5**, two majors above this project's floor of
+20. On older Node it installs cleanly and then every hook fails at
 *runtime* — which reads as a broken session rather than a version problem. So
 `install-machine` checks first and skips it with an explanation.
 
@@ -53,23 +80,27 @@ distro expect to install Node before either of them.
 
 ---
 
-## macOS
+## macOS, Linux and WSL2
 
-launchd user agent at `~/Library/LaunchAgents/com.agentmemory.server.plist`.
+**Nothing to supervise.** Earlier versions installed a launchd user agent
+(`~/Library/LaunchAgents/com.agentmemory.server.plist`) and a systemd `--user`
+unit (`~/.config/systemd/user/agentmemory.service`), plus `loginctl
+enable-linger` on Linux so the memory server survived logout. All of that
+existed to pin one working directory for a backend that no longer ships.
 
-## Linux
-
-systemd `--user` unit at `~/.config/systemd/user/agentmemory.service`.
-`install-machine` also runs `loginctl enable-linger`, without which the memory
-server dies at logout on most distros.
-
-**Without systemd** (containers, minimal distros) there is no supervisor. The
-tool detects this and prints the exact manual command — including the working
-directory, which is not optional:
+What remains is claude-mem's worker, started by you or by your shell profile:
 
 ```bash
-cd ~/.agentmemory && agentmemory --tools core &
+npx claude-mem start
+agent-tools doctor        # checks :37701 and prints the fix
 ```
+
+`loginctl enable-linger` and `systemd=true` in `/etc/wsl.conf` are no longer
+required by anything in this project. If you set them up for agent-tools, they
+are now inert here (other software on your machine may still want them).
+
+Retiring a unit an older install left behind: `agent-tools memory
+migrate-from-agentmemory`, documented in [SERVICES.md](SERVICES.md).
 
 **Root without sudo** (containers, CI) is handled: it runs package managers
 directly when uid 0, uses sudo when available, and otherwise stops with
@@ -98,14 +129,18 @@ then `wsl --shutdown` from Windows and reopen.
 Windows binaries through `/mnt/c` interop:
 
 ```
-npm:         /mnt/c/Program Files/nodejs/npm
-agentmemory: /mnt/c/Users/<you>/AppData/Roaming/npm/agentmemory
+npm:        /mnt/c/Program Files/nodejs/npm
+claude-mem: /mnt/c/Users/<you>/AppData/Roaming/npm/claude-mem
 ```
 
-Installing through those puts packages in the **Windows** npm prefix. A Linux
-systemd unit then points at a Windows binary, the service fails, and every
-status check still prints green. This was observed on real WSL2 on 2026-07-29 —
-the installer reported "agentmemory installed ✓" and the service was dead.
+Installing through those puts packages in the **Windows** npm prefix, where
+anything on the Linux side that expects them fails while every status check
+still prints green. This was observed on real WSL2 on 2026-07-29 — the
+installer reported "installed ✓" and the resulting service was dead.
+
+The removal of the supervised backend took away the worst version of this
+failure (a systemd unit pointing at a Windows binary), but the underlying PATH
+problem is unchanged and still bites npm-installed tools.
 
 So inside WSL, **a Windows-hosted binary counts as not installed**. `doctor`
 names the offender and the fix:
@@ -117,21 +152,22 @@ names the offender and the fix:
 
 ### Node version — the trap on Ubuntu 24.04
 
-**agentmemory declares `engines: node >=20`, and npm only WARNS about that.** So
-on Ubuntu 24.04 — whose `apt` Node is **18.19** — it installs happily and then
-crash-loops forever:
+**npm only WARNS about an unmet `engines` field.** So on Ubuntu 24.04 — whose
+`apt` Node is **18.19** — a package declaring `node >=20` installs happily and
+then crash-loops forever:
 
 ```
 SyntaxError: The requested module 'node:util'
 does not provide an export named 'styleText'
 ```
 
-(`styleText` arrived in Node 20.12.) The systemd unit restarts it, so you get a
-service that is permanently "active" and never answers on :3111.
+(`styleText` arrived in Node 20.12.) Under the old supervised backend systemd
+kept restarting it, so you got a service that was permanently "active" and
+never answered.
 
-`agent-tools` now refuses to install agentmemory on Node < 20, and offers a
+`agent-tools` refuses to install the npm-based tools on Node < 20, and offers a
 NodeSource upgrade instead. Verified end to end on a pristine Ubuntu 24.04 WSL2
-distro: 18.19 → 22.23.1 → agentmemory installed → service healthy on :3111.
+distro: 18.19 → 22.23.1 → healthy install.
 
 ### Line endings — CRLF is fatal
 
@@ -188,20 +224,27 @@ Windows via `\\wsl$\`. If your repo already lives on `C:`, it works fine.
 
 ## Windows native
 
-**graphify works** — it is pure Python and installs through `uv`.
+**Supported since 3.3.0**, with one gap.
 
-**agentmemory does not.** Upstream's own README:
+Working: graphify (pure Python via `uv`), claude-mem (plain Node),
+code-review-graph and token-savior (uv), superpowers and context-mode (Claude
+plugin system), caveman and pocock (the `skills` CLI).
 
-> *"On Windows the fast path is WSL2. Native Windows engine setup is manual
-> (about 10 to 20 minutes) and `agentmemory connect` is currently unsupported
-> there."*
+**Not working: rtk.** No scoop or winget package, and its `install.sh` is
+POSIX-only. `agent-tools install rtk` builds it with `cargo install --git` when
+Rust is present, and otherwise prints the release-zip instructions rather than
+installing something that might be the [wrong `rtk`](#rtk-on-native-windows).
 
-Its engine has no PowerShell, scoop or winget package; you fetch
-`iii-x86_64-pc-windows-msvc.zip` from GitHub releases by hand. One exception:
-`agentmemory connect copilot-cli` is Windows-safe.
+### What changed
 
-So on native Windows `agent-tools` sets up graphify and says so plainly rather
-than pretending. **Use WSL2.**
+Through 3.2.x this section read *"graphify works, agentmemory does not — use
+WSL2"*. That was accurate: agentmemory's engine had no PowerShell, scoop or
+winget package (you fetched `iii-x86_64-pc-windows-msvc.zip` by hand), and
+upstream's own README said `agentmemory connect` was *"currently unsupported
+there"*.
+
+Removing that backend removed the blocker. **WSL2 is still the smoother
+route** — one PATH model, no Git Bash quirks — but it is no longer required.
 
 ### Verified on Windows 11 + Git Bash (2026-07-29)
 
@@ -210,7 +253,7 @@ than pretending. **Use WSL2.**
 | platform detection | ✅ `MINGW64_NT-10.0` → `windows` |
 | `doctor` | ✅ degrades honestly, no crash |
 | `install-machine` | ✅ uv 0.12.0 via the Astral installer, graphify with extras + pin |
-| agentmemory | ✅ correctly SKIPPED with the reason |
+| agentmemory (3.2.x only) | ✅ correctly SKIPPED with the reason — the backend is gone as of 3.3.0 |
 | `init` | ✅ gitignore, hook-guard, hook, MCP, AGENTS.md, graph built |
 | `graphify query` | ✅ returned the expected nodes |
 | `graphify affected` | ✅ `.run() [calls] src/app.py:L6` |

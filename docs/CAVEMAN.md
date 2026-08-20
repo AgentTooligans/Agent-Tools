@@ -1,4 +1,15 @@
-# caveman — cutting output tokens
+# caveman — making your assistant less chatty
+
+Most of the token-saving in this stack is about what goes *into* the assistant.
+caveman is about what comes *out*.
+
+It's a style: the assistant drops the filler, the pleasantries and the hedging,
+and answers you in compressed, slightly telegraphic prose. Every technical
+detail survives — code, commands and error messages are never touched. It just
+stops saying "Certainly! I'd be happy to help you with that."
+
+In measured use it cuts output tokens by around 65%. Whether you like reading
+it is a matter of taste, which is why it's easy to turn off.
 
 [github.com/JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) ·
 MIT · installed by default, `--no-caveman` to skip.
@@ -36,6 +47,12 @@ Two steps, because one does not cover everything:
 |---|---|---|
 | caveman's own installer | Claude Code **plugin** + SessionStart / UserPromptSubmit hooks | `~/.claude/plugins/` |
 | `skills add -g` | **global skills** symlinked into every other agent | `~/.agents/skills/caveman*` |
+
+caveman is one of **two** skill packs `agent-tools` installs by default; the
+other is [`pocock`](SKILLS.md) (`/grill-me`, `/handoff`, `/wait-what`). Both use
+the same global mechanism, and [SKILLS.md](SKILLS.md) covers what a skill costs
+per session versus an MCP server, plus the two silent no-ops in the `skills`
+CLI that both packs have to work around.
 
 The hooks are what make it apply **from message one**, rather than only after
 you type `/caveman`. They write a small flag file, `~/.claude/.caveman-active`,

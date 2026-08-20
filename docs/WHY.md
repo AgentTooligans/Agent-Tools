@@ -1,4 +1,17 @@
-# Why every default exists — the incident record
+# Why every default is what it is
+
+This is the honest version of the story. Every rule Agent Tools enforces is
+here, along with what went wrong that made us add it.
+
+We wrote this for two reasons. The first is that a default you don't
+understand is a default you'll eventually "fix" — and then rediscover the
+problem yourself, painfully. The second is that most of these were genuinely
+hard to spot, because the tools involved failed *quietly*. If you're ever
+staring at something in here thinking "surely that's over-cautious", the
+paragraph underneath will tell you what it cost us.
+
+Entries are dated and roughly chronological. You don't need to read it front to
+back — it's a reference, not a narrative.
 
 This is the evidence behind `agent-tools`. Every rule it enforces is here with
 the failure that produced it, so nobody has to rediscover them.
@@ -20,7 +33,7 @@ when you want to know why a rule is a rule.
 | **graphify CLI** | `graphify: command not found` | `uv tool install "graphifyy[gemini]"` |
 | **Hook paths in `.claude/settings.json`** | hooks silently never fire | hooks must call bare **`graphify`**, never an absolute path |
 | **`graphify-out/.graphify_python`** | every graphify run fails | repoint to this machine's uv interpreter |
-| **agentmemory CLI** | `agentmemory: command not found` | `npm i -g @agentmemory/agentmemory` |
+| **agentmemory CLI** *(legacy — removed 3.3.0)* | `agentmemory: command not found` | nothing to do; use `agent-tools memory migrate-from-agentmemory` if a store remains |
 | **`~/.agentmemory/bin/iii`** | engine won't start | a copied binary is the **wrong architecture** — delete it, it re-downloads |
 | **`iii.pid` / `worker.pid` / `engine-state.json`** | `stop --force` may signal an unrelated process | delete; regenerated on start |
 | **MCP servers + plugins** | tools missing in Claude Code | `claude mcp add` / `claude plugin install` |
@@ -215,7 +228,16 @@ bug you are hitting, a feature you want) and can absorb a re-extraction window.
 
 ---
 
-## 3. agentmemory
+## 3. agentmemory — REMOVED IN 3.3.0
+
+**This section is kept as the reason for the removal, not as instructions.**
+`agent-tools` no longer installs, supervises, wires or updates agentmemory.
+Everything below describes why, and remains accurate for anyone still running
+one. The exit is one command, and it does not delete your data:
+
+```bash
+agent-tools memory migrate-from-agentmemory
+```
 
 ### The store-location law (most important thing here)
 
@@ -311,13 +333,14 @@ with `limit: 0` for both request and token quotas.
 ## 5. Verification
 
 ```bash
-./scripts/setup-dev-machine.sh --check
+agent-tools doctor
 graphify query "how does session expiry work"
-agentmemory status
+npx claude-mem status
+agent-tools pocock status
 ```
 
-Expected: graph present with node/edge counts, server healthy on :3111 with your
-real session and observation counts.
+Expected: graph present with node/edge counts, claude-mem's worker answering on
+:37701, and all four pocock skills listed.
 
 
 ---
@@ -411,3 +434,378 @@ already there, because the only way to end up with both is to have run
 (Unlike context-mode, which also hooks `PreToolUse`/`Bash`, this one genuinely
 conflicts. context-mode routes the *result*; rtk and token-savior both rewrite
 the *command*.)
+
+
+---
+
+## 2026-08-19 — removing a backend to delete a supervisor
+
+agentmemory was a supported memory backend through 3.2.x. It is gone as of
+3.3.0. The decision is worth recording because the cost was never the tool — it
+was everything the tool forced this script to carry.
+
+**One fact drove all of it:** the store path was relative to the server's
+working directory (§3 above), and the documented overrides were inert. Keeping
+one store therefore required pinning one working directory forever, which
+required a supervisor, which produced:
+
+- a launchd plist (macOS)
+- a systemd `--user` unit (Linux/WSL)
+- `loginctl enable-linger`, without which the server died at logout
+- a `svc_install` / `svc_stop` / `svc_start` / `svc_describe` / `svc_check`
+  layer in this script, ~120 lines whose entire job was those two files
+- a `--tools core` LAW, because the argument form was the only one honored
+  (env var and `.env` were both ignored) — the difference between 53 MCP tools
+  ≈5,918 tokens per session and 8 ≈995
+- a WSL reboot gap: WSL distros do not start when Windows starts, so systemd
+  inside the distro was not running, so the memory server was not running
+- **and a native-Windows blocker.** Upstream shipped no PowerShell/scoop/winget
+  installer for the iii engine, and `agentmemory connect` was unsupported
+  there. That single fact is why this project said "Windows = graphify only"
+  for three minor versions.
+
+claude-mem has none of these properties: absolute store path, its own worker,
+no unit, no cwd trap, and it is plain Node so it runs anywhere Node does.
+
+**What removal actually deleted:** the plist, the unit, the linger call, the
+five `svc_*` functions, the cwd pinning, the `--tools core` law, an entire
+`SERVICES.md` page of supervisor documentation — and the Windows caveat in
+every table in this repo.
+
+**What it did not delete: your data.** `~/.agentmemory` is untouched, `doctor`
+still detects an install that is capturing (loudly, if claude-mem is capturing
+too), `migrate export` still archives the store, and
+`scripts/agentmemory-to-claude-mem.py` still converts it.
+
+**The honest caveat:** the migration is one-way and lossy. claude-mem has no
+ingest API, so the converter synthesises a transcript and feeds claude-mem's own
+Stop hook — which **summarises on ingest**. The converted memories are
+claude-mem's compression of yours. That is why the migration exports to Markdown
+first and tells you to keep that export as the exact record. See
+[MEMORY.md](MEMORY.md).
+
+---
+
+## 2026-08-19 — two silent no-ops in the `skills` CLI
+
+Adding the `pocock` pack surfaced two failure modes that both **exit 0**, which
+is the worst kind.
+
+**1. `--skill` takes one name, and a comma list matches nothing.**
+
+```
+$ npx -y skills add mattpocock/skills --skill 'grill-me,grilling,handoff,wait-what' \
+      --agent '*' -g -y
+■  No matching skills found for: grill-me,grilling,handoff,wait-what
+●  Available skills:
+   - ask-matt
+   ...
+$ echo $?
+0
+```
+
+It prints the repository's full catalogue and installs **nothing**, successfully.
+The working form repeats the flag: `--skill a --skill b --skill c`.
+
+**2. `skills update <name>` exits 0 for a skill that does not exist.**
+
+```
+$ npx -y skills update no-such-skill-xyz -g -y ; echo $?
+0
+```
+
+So the exit code cannot be used to report an update. `agent-tools update pocock`
+checksums `~/.agents/skills/<skill>/**` before and after and reports what
+actually happened — changed, already current, or gone.
+
+**And: `grill-me` is a stub with a hard dependency nothing enforces.**
+
+Its entire body is *"Call the Skill tool with 'grilling'"*. `grilling` ships as
+a **separate directory** in the same repo, so `--skill grill-me` alone installs
+a skill that fires and dead-ends. `agent-tools` installs both and treats a
+partial pack as **not installed**, because a pack whose entry point dead-ends is
+broken rather than partially working.
+
+---
+
+## 2026-08-19 — an install script that skipped its own dependencies
+
+`install.sh` copied `agent-tools` and two optional graphify helpers to
+`~/.local/bin`, and stopped there. But `agent-tools` **shells out** to three
+Python scripts it expects to find next to its own binary:
+
+```
+claude-mem-export.py          memory export + obsidian
+memory-export.py              export from a legacy agentmemory server
+agentmemory-to-claude-mem.py  the migration off agentmemory
+```
+
+None of them was installed. The result was a machine where
+`agent-tools memory export` — and `agent-tools obsidian`, and the whole
+migration path — failed with:
+
+```
+✗ claude-mem-export.py not found next to agent-tools
+```
+
+It went unnoticed because the developer machine had the files there from an
+earlier manual copy, so the fallback `$(dirname "$0")/scripts/` never had to
+work. Reproduced on 2026-08-19 with a clean `PATH` and a fresh install
+directory. `install.sh` now copies all three and warns if the checkout is
+missing any.
+
+
+---
+
+## 2026-08-19 — a restore that also littered your home directory
+
+The manual migration instructions (Part 2 of [MIGRATION.md](MIGRATION.md)) built
+the archive with two `-C` groups:
+
+```bash
+tar czf ~/agent-move.tgz \
+  -C "$HOME"         .claude-mem .claude.json .config/graphify .config/agent-tools \
+  -C "$HOME/.claude" CLAUDE.md RTK.md settings.json plans projects
+```
+
+That is correct, and it is the only way to pull files out of `~/.claude` without
+the `.claude/` prefix riding along. But the **restore** was:
+
+```bash
+tar xzkf ~/agent-move.tgz -C "$HOME"          # <-- unpacks EVERYTHING
+mkdir -p ~/.claude && tar xzkf ~/agent-move.tgz -C ~/.claude \
+  CLAUDE.md RTK.md settings.json plans projects
+```
+
+The second group's members are stored under **bare names** — `CLAUDE.md`,
+`plans/`, `projects/` — because that is what the second `-C` did. So the first,
+unscoped extract dropped all five of them **loose into `$HOME`**, and the second
+extract then put the correct copies in `~/.claude`. Net result: the right data,
+plus `~/CLAUDE.md`, `~/RTK.md`, `~/settings.json`, `~/plans/` and `~/projects/`
+as litter — the last two being a full copy of every session transcript in the
+wrong place.
+
+Verified 2026-08-19 by running the documented commands against a scratch profile
+and listing what landed. The fix is to name the members on the first extract
+too, which both the bash and PowerShell versions now do.
+
+**`agent-tools migrate export` / `import` never had this bug.** It writes a
+newline-delimited file list of full HOME-relative paths (`.claude/CLAUDE.md`,
+not `CLAUDE.md`) and uses a single `-C`-free extract, so there is nothing to
+mis-scope. Confirmed on the same scratch profile. This was a defect in the
+hand-rolled fallback only — which is an argument for using the command.
+
+## 2026-08-20 — a suppression comment that turned static analysis off entirely
+
+`install_pocock` splits a newline-delimited list on purpose, so it carried a
+suppression:
+
+```bash
+# shellcheck disable=SC2046  -- deliberate word splitting on a newline list
+```
+
+That line does not parse. ShellCheck expects `disable=SC2046` and nothing else;
+the trailing `-- prose` makes it a malformed directive, and a malformed
+directive is not a warning — it **aborts the whole file**:
+
+```
+agent-tools:1583:5: error: Couldn't parse this shellcheck directive. [SC1073]
+agent-tools:1583:36: error: Expected '=' after directive key. [SC1072]
+```
+
+Two errors, zero warnings, exit non-zero. Read quickly, that looks like "one
+tiny complaint about a comment". What it actually meant was that **not one line
+of the 2,900-line script had been checked** for as long as the comment existed.
+Moving the prose to its own line above the directive dropped six real warnings
+out of hiding, one of which (`ls | grep -c`) was a genuine mis-count on
+filenames.
+
+**The law**: a directive line carries directives only. Prose goes above it.
+
+`tests/bash/run-tests.sh` now greps for the malformed form directly, because
+"shellcheck passes" and "shellcheck ran" are not the same claim, and only the
+first one is visible in a CI log.
+
+## 2026-08-20 — a scope flag that lied about what it did
+
+`agent-tools install pocock --project` was accepted, printed nothing unusual,
+and installed **machine-wide**. Same for `caveman`. The flag was silently
+inert, and worse, `agent-tools unwire pocock` actively recommended it:
+
+```
+✗ pocock has no per-project MCP entry — it is a plugin
+!  use: agent-tools install pocock --project
+```
+
+Both halves were wrong. pocock is not a plugin, it is a skill pack, and the
+command being suggested does nothing per-project.
+
+The underlying fact is that **skills have no project scope to select**. The
+`skills` CLI writes either `~/.agents/skills` (with `-g`) or
+`$PWD/.agents/skills` (without). The second is not a scope — no agent reads it.
+It is a stray directory in whatever repo you were standing in, which is why
+every skill command here runs from a throwaway temp directory in the first
+place. So `install_pocock` hardcodes `-g`, correctly, and `--project` had
+nothing to act on.
+
+This is the same confusion that makes people expect `agent-tools init` to
+install the skill packs. `init` is the per-project command; skills are one copy
+for the whole machine, so they belong to `install-machine`. Nothing was broken —
+but nothing said so, and the scope table in the README omitted pocock entirely,
+leaving `init` as the only plausible place for it to happen.
+
+Now: the flag says what it is doing, `unwire` classifies hook vs skill pack vs
+plugin correctly, `agent-tools tools` prints the rule, and the README scope
+table has the row it was missing.
+
+**The general law**: a flag that cannot apply must say so. Accepting it and
+doing something else is worse than rejecting it, because the user walks away
+believing the scope changed.
+
+## 2026-08-20 — `--purge` deleted the graph of the repo it was run in
+
+Testing the new `uninstall all --purge` was done with a fake `HOME`, a stubbed
+`PATH` and a throwaway store — but from the repo's own directory. `graphify`'s
+data list includes the **per-repo** path:
+
+```
+<repo>/graphify-out      this repo's graph and semantic cache
+```
+
+which is exactly what a per-project path is supposed to mean. So `--purge`
+deleted this project's `graphify-out/`. The two tracked files came back from
+git; the graph and caches did not, and had to be rebuilt.
+
+Nothing about the code was wrong. The test was wrong, in a way that fake `HOME`
+does not protect against: **`HOME` isolation does not isolate the working
+directory.** Any tool with per-project state has a second root, and `cd` is the
+only thing that moves it.
+
+Two changes came out of it:
+
+* `tests/bash/run-tests.sh` refuses to run `agent-tools` with a cwd outside its
+  own sandbox, exiting 99 rather than proceeding. A test that forgets to leave
+  the repo now fails loudly instead of deleting real work.
+* Both README and UPDATING.md carry the warning explicitly: `uninstall
+  <tool> --purge` inside a repo deletes **that repo's** data.
+
+**The law**: when a command has per-project and machine-wide effects, sandbox
+BOTH roots, or do not run it.
+
+## 2026-08-20 — a `--version` flag that starts a server
+
+The first version of `agent-tools status` asked every tool for its version the
+obvious way. For two of them that is fine. For the third:
+
+```
+$ token-savior --version
+[token-savior] auto-discovered 20 project(s): Agent-Tools, a data-generator project-... 
+```
+
+It does not print a version. It boots the recall server, enumerates every
+project on the machine, and blocks. `agent-tools status` inherited that and
+hung past three minutes.
+
+`uv tool list` answers for all three uv-installed tools in one fast call, so
+that is what the inventory uses now, and a test asserts nothing ever probes
+`token-savior --version` again.
+
+The same shape, found the same way, one layer up: `plugin_installed` shelled
+out to `claude plugin list` **twice per plugin**, which was invisible when three
+commands called it and a multi-minute stall once the inventory called it for
+every feature. It now reads the list once per process. Both fixes are the same
+lesson — **a helper that was cheap when called three times is not automatically
+cheap when called thirty.**
+
+## 2026-08-20 — counting the wrong things
+
+The first inventory reported `caveman  2/1 skills` and `pocock  24/4 skills`.
+
+Both came from counting **directory entries** instead of **expected names**:
+
+* `~/.agents/skills` is shared by every pack, so counting its entries counted
+  all 24 skills on the machine and called them pocock's.
+* `~/.agents/skills/caveman` is *one* skill's directory; counting the files
+  inside it produced "2 of 1".
+
+Now the count walks the list of skills the pack is supposed to install and
+checks each by name — 13/13 and 4/4, which are the true answers. A number that
+looks authoritative and is wrong is worse than no number.
+
+## 2026-08-20 — MCP was never the requirement
+
+The tools were wired as MCP servers because Claude Code was the first host, and
+that quietly became the assumption: `init` added a server, `wire`/`unwire` only
+knew the two opt-in ones, and every other agent got a paragraph of manual
+instructions in a document.
+
+Both halves of that were wrong.
+
+**On cost.** An MCP server re-sends its entire tool schema **every session,
+whether or not you call it**. graphify's is ~1.5k tokens; code-review-graph
+ships 30 tools. The same questions are answerable from a CLI that costs
+**nothing** until it runs:
+
+```bash
+graphify query "..."   graphify affected "..."   graphify god-nodes
+code-review-graph query|impact|search            ts get|search|ctx
+```
+
+**On reach.** Codex, Antigravity, Cursor and Gemini do not read Claude Code's
+MCP config and never will. They can all run a shell command. The MCP path was
+simultaneously the most expensive one and the least portable one.
+
+What was already right, and had simply not been named: the instruction block
+`init` writes goes into **`AGENTS.md`**, the cross-agent standard, and contains
+**no `mcp__` tool names** — it teaches the CLI. Every agent could already use
+these tools; nothing said so.
+
+So MCP is now explicitly the optional path:
+
+* `agent-tools init --no-mcp` wires no server at all.
+* `agent-tools wire|unwire graphify` toggles it per repo — previously graphify's
+  server could be added by `init` but never removed by name.
+* `agent-tools agents` detects the installed hosts and prints how each one gets
+  the tools, including `graphify install --platform codex|antigravity|…`, which
+  installs graphify's own **skill** rather than a server.
+
+**The law**: pick the delivery mechanism by what it costs *per session*, not by
+what the first host happened to support. A tool schema you are not using is
+still a tool schema you are paying for.
+
+## 2026-08-20 — flipping the MCP default
+
+3.4.0 changed what `agent-tools init` does: it no longer wires graphify's MCP
+server. `--add-mcp` opts a repo in.
+
+The arithmetic is the whole argument. An MCP server re-sends its complete tool
+schema **every session, whether or not it is called**. graphify's is ~1.5k
+tokens. A repo where you ask two graph questions a week was paying that on
+every session in between — and paying it again for `code-review-graph` (30
+tools) and `token-savior` if those were wired too.
+
+The CLI answers the same questions, from the same `graphify-out/graph.json`,
+for **zero** standing cost. It is the same package: `uv tool install graphifyy`
+installs `graphify` and `graphify-mcp` together, so wiring installs nothing and
+unwiring removes nothing. The choice is purely which front door the agent uses.
+
+**The MCP advantage is real and was weighed, not dismissed.** An agent that can
+*see* a tool in its list reaches for it unprompted; a CLI has to be taught. But
+the teaching already existed — the instruction block `init` writes into
+`AGENTS.md` — and it costs roughly 40 tokens against 1,500. For a graph you
+query constantly the server still earns its place, which is why `--add-mcp`,
+`wire` and `unwire` are all per repo.
+
+Two safeguards came with the flip:
+
+* **`init` never removes a server you added.** It is idempotent and re-run
+  routinely to pick up new hooks; a maintenance command that silently tore out
+  configuration would be a trap. It reports `already wired here — left as-is`.
+* **`doctor` stopped calling an unwired repo a problem.** It now reports `CLI
+  mode (default, 0 tokens)`, because that is the recommended state, and a
+  warning that fires on the correct configuration trains people to ignore
+  warnings.
+
+**The law**: choose a delivery mechanism by what it costs when you are *not*
+using it. Anything charged per session is charged on the sessions where it
+contributes nothing.

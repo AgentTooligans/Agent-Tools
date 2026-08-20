@@ -1,8 +1,18 @@
-# Memory backends: choosing, switching, converting
+# Memory — so you stop re-explaining your own project
 
-Two tools do this job well. **Only one should be capturing at a time** — each
-hooks the session lifecycle, so two active backends means every tool call fires
-two hook sets into two stores.
+Without memory, every session starts from nothing. You explain the same
+architecture, re-litigate the same decision, and watch your assistant
+confidently suggest the approach you already rejected last week.
+
+Memory fixes that. It captures what happened in a session — decisions,
+rationale, what was tried and rejected — and makes it searchable next time.
+
+There's one backend: **claude-mem**. It runs locally, stores everything in
+`~/.claude-mem`, and nothing leaves your machine.
+
+> **Upgrading from an older version?** agentmemory was removed in 3.4.0. Your
+> old store is untouched and there's a one-command migration. Your old store is untouched and there is a one-command migration —
+[skip to it](#migrating-off-agentmemory).
 
 Two of the optional tools also store session data, and neither is a substitute:
 
@@ -11,45 +21,36 @@ Two of the optional tools also store session data, and neither is a substitute:
   ago, and does not try to. Run it alongside a backend, not instead of one.
 - **token-savior** ships a genuine memory engine (SQLite WAL + FTS5 +
   vectors). On a machine running `--memory=none` it can be your backend. On a
-  machine already running claude-mem or agentmemory it is a **second store
-  recording the same sessions** — leave that half unwired.
+  machine already running claude-mem it is a **second store recording the same
+  sessions** — leave that half unwired.
 
 `agent-tools doctor` warns when two capturers are **active**, not merely
 installed. See [TOOLS.md](TOOLS.md#memory--one-capturer-always).
 
 ---
 
-## The comparison
+## claude-mem
 
-| | **claude-mem** (default) | **agentmemory** |
-|---|---|---|
-| stars / npm | 88.9k · 73.6k per month | 25.9k |
-| store | `~/.claude-mem/` — SQLite + Chroma vectors | `./data/` **relative to the server's working directory** |
-| store override | `CLAUDE_MEM_DATA_DIR` (honored) | `AGENTMEMORY_DATA_DIR` (**documented but inert**) |
-| service | worker on :37701, `npx claude-mem start`; no launchd/systemd unit | supervised server on :3111 (launchd/systemd) |
-| context injection | **automatic**, from your second session in a project | opt-in (`AGENTMEMORY_INJECT_CONTEXT`, off — costs tokens) |
-| ingest past sessions | no bulk importer; ships `/learn-codebase` for a repo | `import-jsonl` over `~/.claude/projects` |
-| export to Markdown | yes (`agent-tools memory export`, reads its SQLite read-only) | yes |
-| write API | none — only its own hooks write | `POST /agentmemory/remember` |
-| MCP surface | registers its own | 53 tools by default; **8 with `--tools core`** |
-| multi-agent | claude-code, codex, cursor, copilot, gemini, windsurf, warp, opencode, openclaw, antigravity | similar list via `agentmemory connect` |
+| | |
+|---|---|
+| store | `~/.claude-mem/` — SQLite + Chroma vectors, **absolute path** |
+| store override | `CLAUDE_MEM_DATA_DIR` (honored) |
+| service | worker on :37701 via `npx claude-mem start`; **no launchd/systemd unit** |
+| context injection | **automatic**, from your second session in a project |
+| ingest past sessions | no bulk importer; ships `/learn-codebase` for a repo |
+| export to Markdown | yes (`agent-tools memory export`, reads its SQLite read-only) |
+| write API | none — only its own hooks write |
+| MCP surface | registers its own |
+| multi-agent | claude-code, codex, cursor, copilot, gemini, windsurf, warp, opencode, openclaw, antigravity |
 
-Neither is Claude-only — that is a common misconception. Both ship adapters for
-roughly the same set of hosts.
+It is not Claude-only — a common misconception. It ships adapters for roughly
+the same host list agentmemory did.
 
-### Which to pick
-
-**claude-mem** if you want it to just work: no supervised service, no working-
-directory trap, and context appears automatically at session start.
-
-**agentmemory** if you want a supervised server with a documented write API
-(`POST /agentmemory/remember`) that anything can post to, and you do not mind
-that its working directory decides where the data lands.
-
-Neither export nor history-rebuilding separates them any more: `agent-tools`
-ships a Markdown exporter and a transcript importer for both. What still differs
-is the *write path* — agentmemory takes writes from any client, while claude-mem
-only writes through its own hooks.
+**The one thing to know: the worker is not autostarted.** claude-mem's own
+installer prints *"Worker autostart skipped — start it manually with `npx
+claude-mem start`"* and moves on. No worker means no capture, and nothing in
+the session tells you. `agent-tools doctor` checks :37701; [SERVICES.md](SERVICES.md)
+has a login-time snippet.
 
 ---
 
@@ -57,38 +58,102 @@ only writes through its own hooks.
 
 ```bash
 agent-tools install-machine --memory=claude-mem     # default
-agent-tools install-machine --memory=agentmemory
-agent-tools install-machine --memory=none           # graphify only
+agent-tools install-machine --memory=none           # graphify only, nothing captures
 agent-tools memory status                           # which one is active
 ```
 
 The choice is stored in `~/.config/agent-tools/config`.
+
+A config file that still says `memory_backend=agentmemory` does not break:
+agent-tools falls back to claude-mem, prints one notice, and leaves your store
+alone.
 
 ---
 
 ## Switching
 
 ```bash
-agent-tools memory switch claude-mem
-agent-tools memory switch agentmemory
+agent-tools memory switch claude-mem     # start capturing
+agent-tools memory switch none           # stop capturing; store kept
 ```
 
-**Machine-wide, not per-project.** Both backends hook at user scope and keep one
-global store, so a per-project split would fragment your history and require
-both to stay hooked — exactly the conflict this avoids.
+**Machine-wide, not per-project.** Memory hooks at user scope and keeps one
+global store, so a per-project split would fragment your history.
 
-The switch always: **exports first**, then converts what can be converted, then
-**stops and disables** the outgoing backend (service *and* plugin hooks). The
-outgoing store is **never deleted**, so switching back is possible.
+The switch **exports first**, every time. `switch none` stops the worker but
+leaves both the store and claude-mem's hooks in place, so switching back costs
+nothing.
+
+To remove claude-mem itself:
+
+```bash
+agent-tools uninstall claude-mem
+```
+
+That runs `npx claude-mem uninstall`, records the backend as `none` so the
+default cannot silently reinstate one, and then — separately — asks whether you
+also want `~/.claude-mem` deleted. **That store is every session it has ever
+captured and cannot be regenerated**, so the default answer is no; `--purge`
+deletes it, `--keep-data` keeps it without asking. See
+[UPDATING.md](UPDATING.md#removing-things).
+
+---
+
+## Migrating off agentmemory
+
+agentmemory was a supported backend through 3.2.x. It is gone as of 3.3.0.
+
+### Why it was removed
+
+Not a quality judgement — a maintenance one. Three facts, all verified:
+
+- **The store path was relative to the server's working directory**
+  (v0.9.28: `./data/state_store.db`). `AGENTMEMORY_DATA_DIR` and `--data-dir`
+  were documented and **inert**. Start the server from the wrong place and you
+  silently got a new, empty memory.
+- **Surviving that required a supervisor.** The launchd plist and systemd unit
+  this repo shipped existed almost entirely to pin one working directory — and
+  brought `loginctl enable-linger`, a WSL-after-Windows-restart gap, and a
+  `--tools core` argument that could not be set any other way (as an env var or
+  in `.env` it was ignored, which is the difference between 53 MCP tools
+  ≈5,918 tokens of schema per session and 8 ≈995).
+- **It had no native-Windows engine installer**, and `agentmemory connect` was
+  unsupported there. That single fact pinned this whole project to
+  "Windows = graphify only" for three minor versions.
+
+Removing it deleted the plist, the unit, the linger call, the cwd pinning, the
+`--tools core` law, and the Windows blocker in one go.
+
+### The migration
+
+**Your data is not deleted.** `~/.agentmemory` is left byte-for-byte intact.
+
+```bash
+agent-tools memory migrate-from-agentmemory
+```
+
+It runs in three stages and asks before each destructive one:
+
+1. **Export** the store to Markdown at `~/agentmemory-export-<date>` — the exact
+   record, before anything is touched. (Needs the server running on :3111; if it
+   is stopped, the command tells you how to start it once.)
+2. **Import** what it can into claude-mem (see the asymmetry below).
+3. **Retire the service**: stop it, disable the launchd job (keeping the plist
+   as `.disabled`) or the systemd unit, disable the Claude Code plugin so its
+   hooks stop firing, and remove the stale MCP entry.
+
+`agent-tools doctor` detects a legacy install and tells you whether it is still
+capturing alongside claude-mem — which is worth fixing, because that means two
+hook sets fire on every tool call.
 
 ### The asymmetry
 
 |  | possible? | how |
 |---|---|---|
-| claude-mem → agentmemory | ✅ | memories POSTed to `/agentmemory/remember` |
 | agentmemory → claude-mem | ⚠️ indirectly | claude-mem has **no ingest API** |
+| claude-mem → agentmemory | ❌ | the backend no longer exists |
 
-Going *to* claude-mem, memories cannot be injected. Instead
+Memories cannot be injected into claude-mem. Instead
 `scripts/agentmemory-to-claude-mem.py` synthesises a Claude Code transcript
 containing them and feeds claude-mem's own Stop hook, so claude-mem summarises
 and embeds them **natively** — the only way they end up semantically
@@ -108,6 +173,17 @@ were not real work sessions. **Keep the Markdown export as the exact record.**
 ```bash
 agent-tools memory export ~/my-memory-notes    # one note per memory + INDEX
 ```
+
+### Handling the old store by hand
+
+If you would rather not run the migration, two rules from the agentmemory era
+still apply to that directory:
+
+- **Stop the server before copying store files**, or the live engine overwrites
+  the session index mid-copy. Store files are JSON plus an 8-byte hash/length
+  footer; hand-edit them and the engine rejects the file.
+- **Never run `memory_heal` on a freshly restored store** — restored
+  observations look exactly like the "orphaned" data it deletes.
 
 ---
 
@@ -144,20 +220,24 @@ Two quirks the script works around, both found by running it:
 
 ## Not competing
 
-`doctor` distinguishes **installed** from **active**:
+Only one backend ships now, so the common conflict is a **legacy agentmemory
+still capturing** alongside claude-mem. `doctor` distinguishes **installed**
+from **active**:
 
-- both **active** → error, with the command to stop one
-- one active, one installed-but-inert → fine, reported as an archive
+- both **active** → error, with the command to fix it
+- legacy present but inert → fine, reported as an archive
 
-An inert backend costs nothing and remains a searchable archive if you
-re-enable it. That is a legitimate setup, and the tool no longer nags about it.
+An inert install costs nothing and remains a searchable archive if you
+re-enable it. That is a legitimate setup, and the tool does not nag about it.
 
-To make one inert by hand:
+The supported fix is `agent-tools memory migrate-from-agentmemory`. To make one
+inert by hand instead:
 
 ```bash
 claude plugin disable agentmemory@agentmemory --scope local   # stop its hooks
 launchctl bootout gui/$(id -u)/com.agentmemory.server         # macOS service
 systemctl --user disable --now agentmemory                    # Linux/WSL
+claude mcp remove agentmemory -s local                        # stale MCP entry
 npx claude-mem stop                                           # claude-mem worker
 ```
 
@@ -190,7 +270,8 @@ no per-project backend, deliberately). The memory *itself* is another matter.
 | | where it lives | travels? |
 |---|---|---|
 | claude-mem store | `~/.claude-mem/` (SQLite + Chroma) | **no** |
-| agentmemory store | the server's working directory | **no** |
+| legacy agentmemory store | `~/.agentmemory/` | **no** |
+| global skills (caveman, pocock) | `~/.agents/skills/` | **no** — but `install-machine` reinstalls them |
 | transcripts | `~/.claude/projects/` | **no** — so `claude --resume` history is per-machine |
 | graphify semantic cache | `graphify-out/cache/` **if committed** | **yes** |
 | git hooks | `.git/hooks/` | **no** — git never clones hooks; re-run `agent-tools init` |
