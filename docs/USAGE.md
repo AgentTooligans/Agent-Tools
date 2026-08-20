@@ -8,6 +8,27 @@ The short version: **the graph knows what your code *is*. Memory knows what you
 you're asking "why on earth did we do it this way?", that's memory.
 
 This page covers when each one earns its keep, what the graph is genuinely bad
+
+## Which model builds the graph?
+
+The structural pass needs no model at all — it's local AST parsing. Only the
+semantic pass (docs, concepts, community naming) calls one, and the backend is
+chosen in this order:
+
+1. **`AGENT_TOOLS_BACKEND` or `GRAPHIFY_BACKEND`**, if you set either. An
+   explicit choice always wins.
+2. **`claude-cli`**, if the `claude` CLI is installed — no API key, billed to
+   an existing subscription, so it's free at the margin for people who have it.
+3. **Whatever API key you have.** graphify auto-detects from `GEMINI_API_KEY`,
+   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` and friends.
+4. **A local ollama** on `:11434`.
+
+If none of those exist, `agent-tools refresh` refuses to start and points you
+at `--code-only`, which needs nothing.
+
+> Earlier versions passed `--backend claude-cli` unconditionally. That
+> **overrode** graphify's own auto-detection, so a machine with a Gemini key
+> and no Claude CLI failed for no good reason. See [WHY.md](WHY.md).
 at (there are real gaps — grep is still the right tool sometimes), and how to
 get your assistant to actually reach for them.
 

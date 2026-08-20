@@ -399,6 +399,46 @@ check "14c --no-mcp is documented in help" $(has "$(run help)" -- '--no-mcp' && 
 check "14d no separate MCP install path" \
     $(! grep -qE 'install .*graphify-mcp|uv tool install .*-mcp"' "$AT" && echo 0 || echo 1)
 
+# 15. LLM backend selection. `refresh` used to hardcode --backend claude-cli,
+#     which OVERRODE graphify's own auto-detection and broke every user who had
+#     an API key but no Claude CLI.
+# ---------------------------------------------------------------------------
+check "15a refresh no longer hardcodes a backend" \
+    $(! grep -qE 'graphify (extract|label) [^|]*--backend claude-cli' "$AT" && echo 0 || echo 1) \
+    "$(grep -nE 'graphify (extract|label) [^|]*--backend claude-cli' "$AT" || true)"
+check "15b a backend chooser exists" $(grep -q 'graphify_backend_args' "$AT" && echo 0 || echo 1)
+check "15c an explicit override is honoured" \
+    $(grep -q 'AGENT_TOOLS_BACKEND' "$AT" && echo 0 || echo 1)
+check "15d API-key detection covers the non-Claude backends" \
+    $(for v in GEMINI_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY; do
+          grep -q "$v" "$AT" || exit 1; done; echo 0)
+check "15e a semantic pass with no backend is refused up front" \
+    $(grep -q 'require_llm_backend' "$AT" && echo 0 || echo 1)
+check "15f --code-only is offered as the no-model path" \
+    $(grep -q 'STRUCTURE needs no model' "$AT" && echo 0 || echo 1)
+# The guard must NOT fire for --code-only, which needs no model at all.
+check "15g --code-only skips the backend requirement" \
+    $(awk '/^refresh\(\)/,/^}$/' "$AT" | grep -q 'mode" != "--code-only"' && echo 0 || echo 1)
+
+# 16. Backend failure modes. Each of these was reproduced against a real
+#     graphify before being asserted here.
+# ---------------------------------------------------------------------------
+check "16a an explicitly named backend is checked for its key" \
+    $(grep -q 'backend_requirement_met' "$AT" && echo 0 || echo 1)
+check "16b the missing requirement is named, not just reported" \
+    $(grep -q 'backend_requirement_hint' "$AT" && echo 0 || echo 1)
+check "16c a failed semantic pass explains itself" \
+    $(grep -q 'semantic_pass_failed' "$AT" && echo 0 || echo 1)
+check "16d it says the graph was not overwritten" \
+    $(grep -q 'NOT overwritten with partial results' "$AT" && echo 0 || echo 1)
+# Both extract paths must route failures through the explainer, not bare exit.
+check "16e both extract calls use the failure explainer" \
+    $([ "$(grep -c 'graphify_backend_args) *\(--mode deep \)\?|| semantic_pass_failed' "$AT")" = 2 ] && echo 0 || echo 1) \
+    "$(grep -n 'graphify extract' "$AT")"
+check "16f every backend graphify supports has a requirement rule" \
+    $(for b in claude-cli openai gemini deepseek ollama; do
+          awk '/^backend_requirement_met\(\)/,/^}/' "$AT" | grep -q "$b" || exit 1; done; echo 0)
+
 # ---------------------------------------------------------------------------
 printf '%s\n' "${results[@]}"
 echo

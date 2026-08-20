@@ -93,6 +93,33 @@ graph.
 `init` is safe to run again any time. It reports what's already in place and
 only adds what's missing.
 
+### You don't need Claude Code
+
+Agent Tools works without it. Only one thing needs a language model — the
+**semantic pass** that reads your docs and names the parts of your graph — and
+you have four ways to provide one:
+
+| you have | what happens |
+|---|---|
+| the `claude` CLI | used automatically, no API key, billed to your existing subscription |
+| any API key (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`) | detected automatically |
+| ollama on `:11434` | used automatically, fully local, no account |
+| none of the above | `agent-tools refresh --code-only` — pure local parsing, no model, no cost |
+
+Force a specific one any time:
+
+```bash
+AGENT_TOOLS_BACKEND=gemini agent-tools refresh
+```
+
+If you start a semantic pass with no model available, it stops immediately and
+tells you these options rather than failing halfway through.
+
+**`--code-only` is a real option, not a consolation prize.** It gives you the
+full structural graph — every function, class, import and call — which is what
+most questions actually need. The semantic pass adds doc understanding and
+readable community names on top.
+
 ### Windows
 
 Use `agent-tools.ps1`, which passes commands through to WSL if you have it and

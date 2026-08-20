@@ -20,6 +20,54 @@ need it. This page explains why, and how each assistant gets at the tools.
 > agent-tools unwire graphify # take the server back out of a repo
 > ```
 
+## Two different questions: which assistant, and which model
+
+These get confused constantly, so plainly:
+
+* **Your assistant** (Claude Code, Codex, Antigravity, Cursor…) *uses* the
+  graph. Any of them can, via the CLI or a skill.
+* **A model** *builds* the graph's semantic layer. That is a separate thing,
+  and your assistant's subscription usually can't drive it.
+
+**Does graphify work with Codex?** Yes for using it — `graphify install
+--platform codex` gives Codex the skill, and the CLI works there like anywhere
+else. **No** for building it: there is no `codex` backend. graphify's list is
+`claude, claude-cli, gemini, openai, deepseek, kimi, ollama, azure, bedrock`.
+A ChatGPT subscription cannot drive it, and neither can Antigravity.
+
+In practice this rarely bites, because a Codex user usually has an
+`OPENAI_API_KEY`, which the `openai` backend uses directly.
+
+### What happens if you have no usable model
+
+`agent-tools refresh` checks before it starts, and stops with instructions:
+
+```
+✗ no LLM backend available for the semantic pass
+
+  The graph's STRUCTURE needs no model at all. This works right now:
+        agent-tools refresh --code-only
+```
+
+`--code-only` is a full structural graph — every function, class, import and
+call — built by local AST parsing. No model, no key, no cost. Only doc
+understanding and readable community names need the semantic pass.
+
+### The four failure modes, and what each looks like
+
+All of these were reproduced against a real graphify, not guessed:
+
+| situation | what happens |
+|---|---|
+| no CLI, no key, no ollama | refuses before starting, names your options, exits 1 |
+| `AGENT_TOOLS_BACKEND=openai` but no `OPENAI_API_KEY` | refuses before starting: *"backend 'openai' was requested, but OPENAI_API_KEY is not set"* |
+| a key that is set but **invalid** | graphify tries, gets a 401, and **refuses to write a partial graph**. Your existing graph is untouched. We then point you at `--code-only` |
+| no docs in the repo at all | nothing to do semantically — the pass is a no-op and the run succeeds |
+
+That third row is the important one. A half-written graph is worse than no
+graph, because it looks fine and answers wrongly. graphify gets this right on
+its own; we just explain it.
+
 ## MCP vs CLI: what is actually different
 
 The most common confusion, so plainly:

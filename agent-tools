@@ -3271,6 +3271,141 @@ _detach_help() {
     echo "      $log"
 }
 
+# ---------------------------------------------------------------------------
+# WHICH LLM BUILDS THE GRAPH
+#
+# The semantic pass needs a model. The AST pass does not -- `refresh
+# --code-only` is pure local parsing and needs nothing at all.
+#
+# We used to pass `--backend claude-cli` unconditionally. That was wrong in a
+# way that only shows up on someone else's machine: graphify ALREADY
+# auto-detects a backend from whatever API key is set, and hardcoding one
+# OVERRODE that detection. A user with a Gemini or OpenAI key and no Claude CLI
+# had a perfectly working setup, and we broke it on purpose.
+#
+# PREFERENCE ORDER, and the reason for each:
+#   1. Whatever the user set explicitly (AGENT_TOOLS_BACKEND, or GRAPHIFY_BACKEND
+#      which graphify reads itself). An explicit choice always wins.
+#   2. claude-cli, IF the `claude` CLI is on PATH. It needs no API key and bills
+#      against an existing Claude Code subscription, so it is free at the margin
+#      for people who already have it. That is the only reason it was the
+#      original default.
+#   3. Nothing. Pass no --backend at all and let graphify pick from the API keys
+#      it finds. This is the path for every non-Claude user.
+# ---------------------------------------------------------------------------
+
+# API-key environment variables graphify recognises, one per supported backend.
+LLM_KEY_VARS="GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY DEEPSEEK_API_KEY MOONSHOT_API_KEY KIMI_API_KEY"
+
+any_llm_key_set() {
+    local v val
+    for v in $LLM_KEY_VARS; do
+        eval "val=\${$v:-}"
+        [ -n "$val" ] && return 0
+    done
+    return 1
+}
+
+# A local ollama answers with no key and no account, so it counts as a backend.
+ollama_running() { curl -sf -m 2 http://localhost:11434/api/tags >/dev/null 2>&1; }
+
+# Prints the --backend argument to use, or NOTHING when graphify should
+# auto-detect. Callers must not quote the result -- an empty string has to
+# vanish rather than become an empty argument.
+graphify_backend_args() {
+    local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
+    if [ -n "$choice" ]; then printf -- '--backend %s' "$choice"; return 0; fi
+    if have claude; then printf -- '--backend claude-cli'; return 0; fi
+    return 0     # silence = let graphify auto-detect
+}
+
+# Human-readable version of the same decision, for messages.
+graphify_backend_name() {
+    local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
+    if [ -n "$choice" ]; then printf '%s (set explicitly)' "$choice"; return 0; fi
+    if have claude; then printf 'claude-cli (the claude CLI is installed)'; return 0; fi
+    if any_llm_key_set; then printf 'auto-detected from your API key'; return 0; fi
+    if ollama_running; then printf 'ollama (running locally)'; return 0; fi
+    printf 'NONE FOUND'
+}
+
+# Refuse to start a semantic pass with no way to run it. graphify would fail
+# partway through, which looks like a broken tool rather than a missing key.
+# What each backend needs before it can answer. An explicit choice is trusted
+# for WHICH backend, never for whether it can actually run -- setting
+# AGENT_TOOLS_BACKEND=openai with no key used to sail past the guard and fail
+# inside graphify, with nothing from us explaining it.
+backend_requirement_met() {   # backend_requirement_met <name>
+    case "$1" in
+        claude-cli)          have claude ;;
+        openai|azure)        [ -n "${OPENAI_API_KEY:-}" ] ;;
+        gemini|google)       [ -n "${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}" ] ;;
+        claude|anthropic)    [ -n "${ANTHROPIC_API_KEY:-}" ] ;;
+        deepseek)            [ -n "${DEEPSEEK_API_KEY:-}" ] ;;
+        kimi|moonshot)       [ -n "${MOONSHOT_API_KEY:-}${KIMI_API_KEY:-}" ] ;;
+        ollama)              ollama_running ;;
+        *)                   return 0 ;;   # unknown name: let graphify judge it
+    esac
+}
+backend_requirement_hint() {  # backend_requirement_hint <name>
+    case "$1" in
+        claude-cli)       printf 'the `claude` CLI is not on your PATH' ;;
+        openai|azure)     printf 'OPENAI_API_KEY is not set' ;;
+        gemini|google)    printf 'neither GEMINI_API_KEY nor GOOGLE_API_KEY is set' ;;
+        claude|anthropic) printf 'ANTHROPIC_API_KEY is not set' ;;
+        deepseek)         printf 'DEEPSEEK_API_KEY is not set' ;;
+        kimi|moonshot)    printf 'neither MOONSHOT_API_KEY nor KIMI_API_KEY is set' ;;
+        ollama)           printf 'nothing is answering on http://localhost:11434' ;;
+        *)                printf 'it may not be configured' ;;
+    esac
+}
+
+require_llm_backend() {
+    local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
+    if [ -n "$choice" ]; then
+        backend_requirement_met "$choice" && return 0
+        c_bad "backend '$choice' was requested, but $(backend_requirement_hint "$choice")"
+        echo
+        echo "  Set what it needs, pick another backend, or skip the model entirely:"
+        echo "        agent-tools refresh --code-only"
+        return 1
+    fi
+    have claude && return 0
+    any_llm_key_set && return 0
+    ollama_running && return 0
+
+    c_bad "no LLM backend available for the semantic pass"
+    echo
+    echo "  The graph's STRUCTURE needs no model at all. This works right now:"
+    echo "        agent-tools refresh --code-only"
+    echo
+    echo "  For the semantic pass (docs, concepts, community names), pick one:"
+    echo "    * Claude Code users:  install the 'claude' CLI — no API key needed"
+    echo "    * an API key:         export GEMINI_API_KEY=...   (or OPENAI_API_KEY,"
+    echo "                          ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY)"
+    echo "    * fully local:        run ollama on :11434"
+    echo
+    echo "  Force a specific one:  AGENT_TOOLS_BACKEND=gemini agent-tools refresh"
+    return 1
+}
+
+# The semantic pass can fail for reasons we cannot check in advance: a key that
+# is set but expired, a revoked token, a rate limit, an unreachable host.
+# graphify reports these correctly and refuses to write a partial graph -- but
+# it says nothing about the option that always works, so we do.
+semantic_pass_failed() {
+    echo
+    c_bad "the semantic pass failed — see graphify's error above"
+    c_warn "your graph was NOT overwritten with partial results (graphify refuses that)"
+    echo
+    echo "  Common causes: an expired or revoked key, a rate limit, no network."
+    echo "  Whatever the reason, the structural graph needs no model and works now:"
+    echo "        agent-tools refresh --code-only"
+    echo "  Then retry the semantic pass once the backend is sorted; completed"
+    echo "  files stay cached, so a re-run resumes rather than starting over."
+    exit 1
+}
+
 refresh() {
     local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
     cd "$root" || exit 1
@@ -3306,7 +3441,16 @@ refresh() {
         return $?
     fi
 
+    # A semantic pass with no model fails partway through and looks like a
+    # broken tool. Check first, and say what to do instead.
+    if [ "$mode" != "--code-only" ]; then
+        require_llm_backend || exit 1
+    fi
+
     hdr "Before"; echo "  $(graph_stats)"
+    [ "$mode" = "--code-only" ] \
+        && echo "  backend: none needed (--code-only is local AST parsing)" \
+        || echo "  backend: $(graphify_backend_name)"
 
     hdr "1/3 structure"     # LAW: structure first, always
     case "$mode" in
@@ -3329,15 +3473,21 @@ refresh() {
         # Raise the ceiling, but never override a value the user set deliberately.
         export GRAPHIFY_API_TIMEOUT="${GRAPHIFY_API_TIMEOUT:-1800}"
         c_warn "API timeout for this run: ${GRAPHIFY_API_TIMEOUT}s per chunk"
-        graphify extract . --backend claude-cli --mode deep || exit 1 ;;
+        # shellcheck disable=SC2046
+        graphify extract . $(graphify_backend_args) --mode deep || semantic_pass_failed ;;
       *)
-        graphify extract . --backend claude-cli || exit 1 ;;
+        # shellcheck disable=SC2046
+        graphify extract . $(graphify_backend_args) || semantic_pass_failed ;;
     esac
     c_ok "$(graph_stats)"
 
     hdr "2/3 labels"        # LAW: `label`, never `cluster-only`; and always LAST
     if [ "$mode" = "--code-only" ]; then c_warn "skipped (code-only); names may be hub-derived"
-    else graphify label . --backend claude-cli >/dev/null 2>&1 && c_ok "communities named" || c_warn "label failed"; fi
+    else
+        # shellcheck disable=SC2046
+        graphify label . $(graphify_backend_args) >/dev/null 2>&1 \
+            && c_ok "communities named" || c_warn "label failed"
+    fi
 
     hdr "3/3 verify"
     graphify tree >/dev/null 2>&1 && c_ok "GRAPH_TREE.html written"

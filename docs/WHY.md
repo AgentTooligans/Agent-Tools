@@ -809,3 +809,78 @@ Two safeguards came with the flip:
 **The law**: choose a delivery mechanism by what it costs when you are *not*
 using it. Anything charged per session is charged on the sessions where it
 contributes nothing.
+
+## 2026-08-20 — hardcoding a backend that most people don't have
+
+`agent-tools refresh` passed `--backend claude-cli` to graphify on all three of
+its LLM calls. On the machine it was written on, that was invisible: the Claude
+CLI was installed, it needs no API key, and it bills against a subscription
+that already existed.
+
+On anyone else's machine it was a wall. No Claude CLI meant the semantic pass
+failed, and the failure looked like a broken tool rather than a missing
+dependency.
+
+The part that makes this a genuine mistake rather than a missing feature:
+**graphify already auto-detects a backend.** Its own help says so —
+`--backend B  gemini|kimi|claude|openai|deepseek|ollama (default: whichever API
+key is set)`. By passing an explicit `--backend` we were *overriding* working
+detection. A user with `GEMINI_API_KEY` set had a perfectly good setup, and we
+went out of our way to break it.
+
+The fix restores the tool's own behaviour and adds a preference order on top:
+
+1. `AGENT_TOOLS_BACKEND` / `GRAPHIFY_BACKEND` — an explicit choice always wins.
+2. `claude-cli`, **only if the CLI is actually present**. Still the best default
+   for people who have it, for the original reason: no key, no marginal cost.
+3. Nothing at all — pass no `--backend` and let graphify detect from API keys.
+
+Plus a preflight check. A semantic pass with no available model now refuses to
+start and names the options, instead of dying partway through:
+
+```
+✗ no LLM backend available for the semantic pass
+
+  The graph's STRUCTURE needs no model at all. This works right now:
+        agent-tools refresh --code-only
+```
+
+`--code-only` was always the answer for a machine with no model, and nothing
+said so.
+
+**The law**: never pass an explicit flag where the tool already auto-detects,
+unless you know something it doesn't. A default that hardcodes your own
+environment is a default that only works for you.
+
+## 2026-08-20 — an assistant is not a model
+
+Two questions kept getting answered as if they were one:
+
+* which **assistant** uses the graph (Claude Code, Codex, Antigravity, Cursor)
+* which **model** builds it (claude-cli, gemini, openai, deepseek, kimi, ollama)
+
+They are unrelated. Any assistant that can run a shell command can *use* a
+graph. Very few subscriptions can *build* one — there is no `codex` backend in
+graphify, and a ChatGPT or Antigravity subscription cannot drive the semantic
+pass. What a Codex user normally has that does work is an `OPENAI_API_KEY`.
+
+Conflating the two produced the hardcoded-backend bug above. Untangling them
+turned up three failure modes worth knowing, each reproduced against a real
+graphify rather than reasoned about:
+
+1. **No backend at all.** Now refused before anything starts, with the options
+   named. Previously it began work and died in the middle.
+2. **A backend named explicitly with nothing behind it** — `AGENT_TOOLS_BACKEND=openai`
+   and no key. This sailed straight past the first version of the guard, because
+   an explicit choice was trusted completely. It is now trusted for *which*
+   backend and verified for *whether it can run*.
+3. **A key that is set but invalid.** Unknowable in advance — you only find out
+   from the 401. graphify handles this exactly right: it reports the failure and
+   **refuses to overwrite the graph with partial results**, which is the
+   behaviour you want, since a half-written graph answers confidently and
+   wrongly. All we add is a pointer to `--code-only` and a note that cached
+   files make a retry cheap.
+
+**The law**: separate "who is asking" from "who is answering". They have
+different requirements and different failure modes, and a check that conflates
+them will pass on the machine it was written on and fail everywhere else.
