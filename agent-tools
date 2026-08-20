@@ -39,7 +39,7 @@ VERSION_DATE=2026-08-20
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
 # copy on a machine that installed from a downloaded archive and therefore has
 # no checkout to pull into.
-REPO_URL="https://github.com/AgentTooligans/AgentTools"
+REPO_URL="https://github.com/AgentTooligans/agent-tools"
 
 BIN="$HOME/.local/bin"
 # Where a pre-3.3.0 agentmemory install left its store. We no longer install,
@@ -2691,10 +2691,10 @@ update_cmd() {
                     c_ok "future updates: agent-tools update self"
                 else
                     c_bad "clone or install failed — do it by hand:"
-                    echo "        git clone $REPO_URL && cd AgentTools && ./install.sh"
+                    echo "        git clone $REPO_URL && cd agent-tools && ./install.sh"
                 fi
             else
-                echo "        git clone $REPO_URL && cd AgentTools && ./install.sh"
+                echo "        git clone $REPO_URL && cd agent-tools && ./install.sh"
             fi
         fi
     fi

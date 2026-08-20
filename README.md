@@ -17,8 +17,8 @@ Agent Tools installs the useful tools for you and encodes every trap we hit alon
 way, so you don't have to hit them too.
 
 ```bash
-git clone https://github.com/AgentTooligans/AgentTools
-cd AgentTools
+git clone https://github.com/AgentTooligans/agent-tools
+cd agent-tools
 ./install.sh
 
 agent-tools install-machine     # once per computer
@@ -40,8 +40,8 @@ you're asked before anything lands on your machine.
 ### 1. Get the code
 
 ```bash
-git clone https://github.com/AgentTooligans/AgentTools
-cd AgentTools
+git clone https://github.com/AgentTooligans/agent-tools
+cd agent-tools
 ```
 
 No git? Download the ZIP from the repo page and unzip it. Everything works the
