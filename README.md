@@ -1,24 +1,19 @@
 # Agent Tools
 
-**Agent Tools helps you write better code with an AI assistant while spending
-far fewer tokens doing it.**
+**Agent Tools helps you write better code with an AI assistant - While using fewer tokens!**
 
-If you use Claude Code, Codex, Cursor or any similar assistant, you have
-probably noticed two things. The assistant burns a lot of context rediscovering
-your codebase every session. And it forgets everything the moment the session
-ends.
+If you use Claude codex, Codex, (or others), you'll know how dumb agents can be,
+and how much can be useful - and also suck.  They forget things, burn tokens, 
+and rush to code without stopping and asking the right questions.  
 
-There are excellent open-source tools that fix both problems — a knowledge
-graph so the assistant can ask *"what calls this?"* instead of reading forty
-files, persistent memory so decisions survive between sessions, and output
-filters so a noisy command doesn't eat your context window.
+Thankfully, some smarter people than I have created tools to help solve this problem. I
+compiled the tools I found most useful into one application.  These tools will/can change,
+so you may need to update often.  The whole AI space is very fluid.  It also installs
+the tools in CLI mode by default to reduce your token usage.  It udpates your AGENT.MD file
+so you only burn tokens when you use a tool.  If you want the MCP installed, you can do that
+too!
 
-The catch is that wiring them together correctly is genuinely fiddly, and most
-of the ways to get it wrong fail **silently**. You end up with a memory backend
-that captures nothing, or three overlapping tools each charging you tokens
-every session to answer the same question.
-
-Agent Tools installs that stack for you and encodes every trap we hit along the
+Agent Tools installs the useful tools for you and encodes every trap we hit along the
 way, so you don't have to hit them too.
 
 ```bash
