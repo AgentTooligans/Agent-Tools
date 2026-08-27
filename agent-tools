@@ -33,8 +33,8 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.4.0
-VERSION_DATE=2026-08-20
+VERSION=3.5.0
+VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
 # copy on a machine that installed from a downloaded archive and therefore has
@@ -918,6 +918,20 @@ doctor() {
                 echo "        graphify claude uninstall   # drops its section (keeps our hook-guard)"
             fi
         done
+        # Claude Code reads CLAUDE.md, NOT AGENTS.md. When our block lives in
+        # AGENTS.md, CLAUDE.md must @-import it or Claude never sees the
+        # instructions. `agent-tools init` sets this up; verify it held.
+        if grep -q "agent-tools:managed" "$root/AGENTS.md" 2>/dev/null; then
+            if [ ! -f "$root/CLAUDE.md" ]; then
+                c_warn "instructions live in AGENTS.md but there is no CLAUDE.md — Claude Code won't read them"
+                echo "        agent-tools init   # creates CLAUDE.md -> @AGENTS.md"
+            elif ! grep -q '^@AGENTS\.md[[:space:]]*$' "$root/CLAUDE.md" 2>/dev/null; then
+                c_warn "CLAUDE.md does not @-import AGENTS.md — Claude Code misses those instructions"
+                echo "        agent-tools init   # adds @AGENTS.md to the top of CLAUDE.md"
+            else
+                c_ok "CLAUDE.md imports @AGENTS.md — Claude Code sees the instructions"
+            fi
+        fi
         if [ -f "$root/.git/hooks/post-commit" ] && grep -q graphify "$root/.git/hooks/post-commit" 2>/dev/null; then
             [ -f "$root/.git/graphify-auto-update-ENABLED" ] && c_warn "auto-update ENABLED" || c_ok "auto-update installed, disabled (default)"
         else c_warn "no post-commit hook"; fi
@@ -1528,8 +1542,11 @@ install_crg() {
         c_ok "code-review-graph $(uv_tool_version "$CRG_PKG") present"
     else
         confirm "code-review-graph (30 MCP tools — read docs/TOOLS.md on overlap first)" || return 0
-        uv tool install "$CRG_PKG" >/dev/null 2>&1 \
-            && c_ok "code-review-graph installed" || { c_bad "install failed"; return 1; }
+        # [communities] extra pulls igraph, enabling Leiden community
+        # detection. Without it CRG still builds but falls back to slower
+        # file-based detection.
+        uv tool install "${CRG_PKG}[communities]" >/dev/null 2>&1 \
+            && c_ok "code-review-graph installed (+communities)" || { c_bad "install failed"; return 1; }
     fi
     c_warn "30 MCP tools is a large per-session schema. Wire it only where you"
     c_warn "want it:  cd <repo> && agent-tools wire code-review-graph"
@@ -1605,6 +1622,12 @@ wire_ts() {
         -- token-savior >/dev/null 2>&1 \
         && c_ok "token-savior MCP wired (project scope, pinned to this repo)" \
         || { c_bad "claude mcp add failed"; return 1; }
+    # token-savior writes .token-savior-cache.json into the repo root (its
+    # per-project index cache, rebuildable). Ignore it, same as we ignore
+    # code-review-graph's index -- committing a regenerable cache is churn.
+    grep -q '^\.token-savior-cache\.json$' "$r/.gitignore" 2>/dev/null || {
+        printf '\n# token-savior index cache (generated, rebuildable)\n.token-savior-cache.json\n' >> "$r/.gitignore"
+        c_ok "ignored .token-savior-cache.json"; }
 }
 
 unwire_ts() {
@@ -3185,6 +3208,24 @@ INSTR
         c_ok "agent instructions added to $instr"
     fi
 
+    # Claude Code loads CLAUDE.md, NOT AGENTS.md. When our block lives in
+    # AGENTS.md (the cross-agent source of truth), Claude would never see it.
+    # Fix it automatically: make CLAUDE.md a one-line @-import of AGENTS.md
+    # (native syntax). CLAUDE.md stays a stub, AGENTS.md keeps the content,
+    # and every agent — Claude included — reads the same instructions.
+    if [ "$instr" = AGENTS.md ]; then
+        if [ ! -f CLAUDE.md ]; then
+            printf '@AGENTS.md\n' > CLAUDE.md
+            c_ok "created CLAUDE.md -> @AGENTS.md (so Claude Code loads it)"
+        elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null; then
+            { printf '@AGENTS.md\n'; cat CLAUDE.md; } > CLAUDE.md.tmp \
+                && mv CLAUDE.md.tmp CLAUDE.md \
+                && c_ok "added @AGENTS.md to top of CLAUDE.md"
+        else
+            c_ok "CLAUDE.md already imports @AGENTS.md"
+        fi
+    fi
+
     if [ -f graphify-out/graph.json ]; then
         c_ok "graph exists: $(graph_stats)"
     else
@@ -3319,6 +3360,33 @@ graphify_backend_args() {
     return 0     # silence = let graphify auto-detect
 }
 
+# graphify's claude-cli backend defaults to Opus, which graphify's own source
+# calls "overkill" for the structured-JSON extraction it performs. Opus is also
+# the slow, rate-limit-hungry option. Default it to Haiku — far faster and
+# cheaper for this shape of work — but ONLY when claude-cli is the effective
+# backend AND the user has not already pinned a model. An explicit
+# GRAPHIFY_CLAUDE_CLI_MODEL always wins; override per-run with e.g.
+# GRAPHIFY_CLAUDE_CLI_MODEL=sonnet agent-tools refresh.
+default_claude_cli_model() {
+    local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
+    if { [ -z "$choice" ] && have claude; } || [ "$choice" = claude-cli ]; then
+        [ -z "${GRAPHIFY_CLAUDE_CLI_MODEL:-}" ] && export GRAPHIFY_CLAUDE_CLI_MODEL=haiku
+    fi
+}
+
+# Optional parallelism override. graphify caps parallel semantic chunks at 4 by
+# default; AGENT_TOOLS_CONCURRENCY raises or lowers it. Most useful on an API
+# backend -- with claude-cli each chunk is a heavy process, and graphify forces
+# the label step to concurrency 1 regardless, so the flag is a no-op there.
+# Must not be quoted by callers: an empty result has to vanish. Ignored unless a
+# positive integer.
+graphify_concurrency_args() {
+    case "${AGENT_TOOLS_CONCURRENCY:-}" in
+        ''|0|*[!0-9]*) return 0 ;;    # unset, zero, or non-numeric: say nothing
+        *) printf -- '--max-concurrency %s' "$AGENT_TOOLS_CONCURRENCY" ;;
+    esac
+}
+
 # Human-readable version of the same decision, for messages.
 graphify_backend_name() {
     local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
@@ -3441,16 +3509,28 @@ refresh() {
         return $?
     fi
 
+    # Gate every graphify pass on the graph actually existing here. A repo may
+    # use code-review-graph or token-savior but NOT graphify — refresh must
+    # touch only what this project has, never fire an LLM graphify run (or
+    # build a graph from scratch) somewhere graphify was never set up. Building
+    # the first graph is `agent-tools init`'s job, not refresh's.
+    if [ -f graphify-out/graph.json ]; then
+
     # A semantic pass with no model fails partway through and looks like a
     # broken tool. Check first, and say what to do instead.
     if [ "$mode" != "--code-only" ]; then
         require_llm_backend || exit 1
     fi
 
+    default_claude_cli_model    # Haiku over Opus for claude-cli, unless pinned
     hdr "Before"; echo "  $(graph_stats)"
-    [ "$mode" = "--code-only" ] \
-        && echo "  backend: none needed (--code-only is local AST parsing)" \
-        || echo "  backend: $(graphify_backend_name)"
+    if [ "$mode" = "--code-only" ]; then
+        echo "  backend: none needed (--code-only is local AST parsing)"
+    else
+        echo "  backend: $(graphify_backend_name)"
+        [ -n "${GRAPHIFY_CLAUDE_CLI_MODEL:-}" ] \
+            && echo "  claude-cli model: $GRAPHIFY_CLAUDE_CLI_MODEL"
+    fi
 
     hdr "1/3 structure"     # LAW: structure first, always
     case "$mode" in
@@ -3474,10 +3554,10 @@ refresh() {
         export GRAPHIFY_API_TIMEOUT="${GRAPHIFY_API_TIMEOUT:-1800}"
         c_warn "API timeout for this run: ${GRAPHIFY_API_TIMEOUT}s per chunk"
         # shellcheck disable=SC2046
-        graphify extract . $(graphify_backend_args) --mode deep || semantic_pass_failed ;;
+        graphify extract . $(graphify_backend_args) $(graphify_concurrency_args) --mode deep || semantic_pass_failed ;;
       *)
         # shellcheck disable=SC2046
-        graphify extract . $(graphify_backend_args) || semantic_pass_failed ;;
+        graphify extract . $(graphify_backend_args) $(graphify_concurrency_args) || semantic_pass_failed ;;
     esac
     c_ok "$(graph_stats)"
 
@@ -3485,7 +3565,7 @@ refresh() {
     if [ "$mode" = "--code-only" ]; then c_warn "skipped (code-only); names may be hub-derived"
     else
         # shellcheck disable=SC2046
-        graphify label . $(graphify_backend_args) >/dev/null 2>&1 \
+        graphify label . $(graphify_backend_args) $(graphify_concurrency_args) >/dev/null 2>&1 \
             && c_ok "communities named" || c_warn "label failed"
     fi
 
@@ -3514,6 +3594,37 @@ print(name)" 2>/dev/null)"
         c_warn "graph is very small ($total nodes) — nothing to match yet, which is fine"
     else
         c_bad "query returned nothing despite $total nodes — investigate"
+    fi
+
+    else
+        c_warn "no graphify graph here — skipping graphify passes"
+        c_warn "    (run 'agent-tools init' if you want graphify in this repo)"
+    fi   # end graphify-graph gate
+
+    # code-review-graph keeps its OWN per-repo index (.code-review-graph/),
+    # separate from graphify's. If it is installed AND wired into this repo,
+    # refresh it too — a local AST parse, no LLM, cheap. The .code-review-graph/
+    # marker is what makes this repo-scoped: refresh touches only the tools this
+    # project actually uses, and stays silent about the ones it does not.
+    if have code-review-graph && [ -d "$root/.code-review-graph" ]; then
+        hdr "code-review-graph index"
+        ( cd "$root" && code-review-graph build 2>&1 | tail -3 ) \
+            && c_ok "code-review-graph index rebuilt" \
+            || c_warn "code-review-graph build failed"
+    fi
+
+    # token-savior indexes lazily via a file-watching daemon — there is no
+    # snapshot to rebuild like graphify or CRG. The nearest thing to a refresh
+    # is warming its daemon so it re-reads this repo's current state. Only when
+    # installed AND wired here (its MCP entry, pinned to this repo, is the
+    # marker — token-savior keeps no per-repo dir). Its `ts` CLI collides with
+    # moreutils' `ts`, so invoke it unambiguously through uv.
+    if have token-savior && have claude \
+       && claude mcp list 2>/dev/null | grep -q "^token-savior"; then
+        hdr "token-savior index"
+        WORKSPACE_ROOTS="$root" uv tool run --from "$TS_PKG" ts daemon warm "$root" >/dev/null 2>&1 \
+            && c_ok "token-savior daemon warmed for this repo" \
+            || c_warn "token-savior warm failed (daemon off? — it also re-indexes lazily on next query)"
     fi
 }
 

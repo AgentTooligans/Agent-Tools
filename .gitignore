@@ -52,3 +52,6 @@ Thumbs.db
 # Python bytecode from running the helper scripts
 __pycache__/
 *.pyc
+
+# token-savior index cache (generated, rebuildable)
+.token-savior-cache.json
