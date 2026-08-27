@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.7.0
+VERSION=3.8.0
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -2471,6 +2471,7 @@ uninstall_one() {
                       unwire_ts
                       [ "$SCOPE_PROJECT" = 1 ] || { uv tool uninstall "$TS_PKG" >/dev/null 2>&1 && c_ok "token-savior removed"; } ;;
         graphify)
+                      local gr; gr="$(repo_root 2>/dev/null)"
                       if [ "$SCOPE_PROJECT" = 1 ]; then
                           have claude && claude mcp remove graphify -s local >/dev/null 2>&1 \
                               && c_ok "graphify MCP removed from this repo"
@@ -2478,7 +2479,10 @@ uninstall_one() {
                           have claude && claude mcp remove graphify -s local >/dev/null 2>&1
                           have uv && uv tool uninstall graphifyy >/dev/null 2>&1 \
                               && c_ok "graphify removed" || c_warn "graphify binary not removed (uv missing?)"
-                      fi ;;
+                      fi
+                      # Remove the per-repo auto-update feature so nothing points
+                      # at a graphify that is gone.
+                      [ -n "$gr" ] && graphify_project_cleanup "$gr" ;;
         claude-mem)
                       # It installs and wires itself, so it uninstalls itself too.
                       if cm_installed; then
@@ -2602,6 +2606,51 @@ unwire_graphify() {
         && c_ok "graphify MCP removed from this project" \
         || c_warn "graphify MCP was not wired here"
     c_ok "the CLI still works: graphify query \"...\"  (and costs nothing per session)"
+}
+
+# Remove graphify's per-repo integration so nothing is left pointing at a
+# binary that is gone: the auto-update gate, the post-commit/post-checkout
+# hooks we installed, and the PreToolUse hook-guard (which would error on every
+# tool call once `graphify` is off PATH). Called when graphify is uninstalled.
+graphify_project_cleanup() {   # graphify_project_cleanup <root>
+    local root="$1" h
+    [ -n "$root" ] || return 0
+    [ -f "$root/.git/graphify-auto-update-ENABLED" ] \
+        && rm -f "$root/.git/graphify-auto-update-ENABLED" \
+        && c_ok "removed auto-update gate"
+    for h in post-commit post-checkout; do
+        if [ -f "$root/.git/hooks/$h" ] && grep -q 'graphify auto-update' "$root/.git/hooks/$h" 2>/dev/null; then
+            rm -f "$root/.git/hooks/$h" && c_ok "removed graphify $h hook"
+        fi
+    done
+    if [ -f "$root/.claude/settings.json" ] && [ -n "${PY:-}" ]; then
+        "$PY" - "$root/.claude/settings.json" <<'PY' 2>/dev/null && c_ok "removed graphify hook-guard from settings.json"
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(1)
+pt = (d.get("hooks", {}) or {}).get("PreToolUse")
+if not isinstance(pt, list):
+    sys.exit(1)
+def is_guard(entry):
+    for h in entry.get("hooks", []) or []:
+        if "graphify hook-guard" in (h.get("command", "") or ""):
+            return True
+    return False
+kept = [e for e in pt if not is_guard(e)]
+if len(kept) == len(pt):
+    sys.exit(1)          # nothing to remove
+if kept:
+    d["hooks"]["PreToolUse"] = kept
+else:
+    d["hooks"].pop("PreToolUse", None)
+    if not d["hooks"]:
+        d.pop("hooks", None)
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
 }
 
 wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
@@ -3274,7 +3323,7 @@ GRAPHIFY="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
 exit 0
 HK
         chmod +x .git/hooks/post-commit
-        c_ok "post-commit hook installed (DISABLED by default)"
+        c_ok "post-commit hook installed"
     else c_ok "post-commit hook already present"; fi
 
     # Branch switches change code wholesale, so a graph built on the old branch
@@ -3313,8 +3362,18 @@ GRAPHIFY="$(command -v graphify || echo "$HOME/.local/bin/graphify")"
 exit 0
 HK
         chmod +x .git/hooks/post-checkout
-        c_ok "post-checkout hook installed (DISABLED by default)"
+        c_ok "post-checkout hook installed"
     else c_ok "post-checkout hook already present"; fi
+
+    # Enable the auto-update gate by default. With it present, every commit and
+    # branch switch rebuilds the CODE graph (AST only — no LLM, no tokens,
+    # runs detached, never blocks the commit). The semantic/doc pass still stays
+    # manual (`agent-tools refresh`). Reversible: delete the gate file to stop.
+    if [ ! -f .git/graphify-auto-update-ENABLED ]; then
+        : > .git/graphify-auto-update-ENABLED
+        c_ok "auto-update ENABLED — code graph rebuilds on commit (AST only, no tokens)"
+        echo "        turn off:  rm .git/graphify-auto-update-ENABLED"
+    else c_ok "auto-update already enabled"; fi
 
     if [ "$ADD_MCP" != 1 ]; then
         # DEFAULT since 3.4.0: no server. Nothing is re-sent every session; the
@@ -3410,7 +3469,7 @@ HK
     echo "  agent-tools doctor    verify"
     echo "  agent-tools refresh   after a batch of work"
     echo "  agent-tools tools     optional tools, and what overlaps here"
-    echo "  touch .git/graphify-auto-update-ENABLED   to auto-update on commit"
+    echo "  auto-update on commit is ON (rm .git/graphify-auto-update-ENABLED to stop)"
     echo
     echo "  Want a second code graph in THIS repo only? (see docs/TOOLS.md first)"
     echo "      agent-tools install code-review-graph && agent-tools wire code-review-graph"

@@ -137,13 +137,14 @@ work is **chunked** (~17 files per chunk), so cost scales with chunks, not files
 `.git/hooks/post-commit` runs `graphify update .` (code only, no LLM). Three
 safety layers:
 
-1. **opt-in gate** — `.git/graphify-auto-update-ENABLED` **absent → skip** (default)
+1. **gate file** — `.git/graphify-auto-update-ENABLED` **absent → skip**. `agent-tools
+   init` creates it, so auto-update is ON after init; delete it to turn off.
 2. **concurrency** — any graphify process running → skip
 3. **detached** — `git commit` never waits
 
 ```bash
-touch .git/graphify-auto-update-ENABLED   # enable
-rm    .git/graphify-auto-update-ENABLED   # disable (also the default)
+touch .git/graphify-auto-update-ENABLED   # enable (init already does this)
+rm    .git/graphify-auto-update-ENABLED   # disable
 tail  .git/graphify-auto-update.log       # what it did
 ```
 

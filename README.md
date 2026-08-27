@@ -86,7 +86,8 @@ agent-tools init
 ```
 
 Run this inside any git repository. It builds the knowledge graph, adds a few
-`.gitignore` rules, installs two optional git hooks (disabled by default), and
+`.gitignore` rules, installs two git hooks that rebuild the code graph on commit
+and branch switch (**enabled by default**, AST only — no LLM, no tokens), and
 writes a short block into your `AGENTS.md` telling the assistant how to use the
 graph.
 
@@ -656,12 +657,18 @@ repo whose docs are already cached finishes in seconds. `status` shows chunk
 progress while it runs. And nothing here touches code — only edited docs cost
 anything, and `--code-only` costs nothing at all.
 
-To auto-refresh the code graph on every commit:
+`agent-tools init` **enables** auto-refresh of the code graph on every commit
+and branch switch — a background AST rebuild, no LLM, no tokens, never blocks the
+commit. (The semantic/doc pass stays manual, since that one costs an LLM.) Toggle it:
 
 ```bash
-touch .git/graphify-auto-update-ENABLED    # enable
-rm    .git/graphify-auto-update-ENABLED    # disable (the default)
+touch .git/graphify-auto-update-ENABLED    # enable (init already did this)
+rm    .git/graphify-auto-update-ENABLED    # disable
 ```
+
+If you ever `agent-tools uninstall graphify`, this feature is removed with it —
+the gate, both git hooks, and the PreToolUse hook-guard are cleaned up so nothing
+is left pointing at a graphify that's gone.
 
 ---
 
