@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.8.0
+VERSION=3.8.1
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -801,6 +801,20 @@ except Exception: print('unreadable')" 2>/dev/null
 }
 
 doctor() {
+    hdr "agent-tools"
+    c_ok "version $VERSION (released $VERSION_DATE)"
+    # Flag a PATH copy edited without a reinstall — same as `agent-tools version`
+    # catches, surfaced here because doctor is where people look for problems.
+    local _self _rec
+    _self="$(command -v agent-tools 2>/dev/null)"
+    _rec="$(recorded_source 2>/dev/null)"
+    if [ -n "$_self" ] && [ -n "$_rec" ] && [ -f "$_rec/agent-tools" ] \
+       && [ "$_rec/agent-tools" != "$_self" ] \
+       && [ "$(file_hash "$_rec/agent-tools" 2>/dev/null)" != "$(file_hash "$_self" 2>/dev/null)" ]; then
+        c_warn "the copy on your PATH differs from the checkout — re-run ./install.sh"
+    fi
+    echo "        install / source detail:  agent-tools version"
+
     hdr "Platform"
     case "$PLATFORM" in
         macos) c_ok "macOS — full support" ;;
