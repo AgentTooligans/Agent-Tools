@@ -303,10 +303,10 @@ Wire it per project, not everywhere.
 
 ```bash
 agent-tools install code-review-graph
-agent-tools wire code-review-graph      # this repo only; also builds the graph
-agent-tools unwire code-review-graph
-code-review-graph status                # graph statistics
-code-review-graph watch                 # keep it current while you work
+agent-tools wire code-review-graph          # this repo only; also builds the graph
+agent-tools wire code-review-graph --watch  # + keep it current in the background
+agent-tools unwire code-review-graph        # removes it and every trace (see below)
+code-review-graph status                    # graph statistics
 ```
 
 Its index lives in `.code-review-graph/` and `wire` adds a `.gitignore` rule —
@@ -315,6 +315,22 @@ it is rebuildable in seconds, so committing it is churn. `install` pulls it as
 detection uses the Leiden algorithm rather than the slower file-based fallback.
 Once wired, `agent-tools refresh` rebuilds this index alongside the graphify
 graph (local AST parse, no LLM).
+
+**`--watch`** wires the MCP server with `--auto-watch`, so it runs a filesystem
+watcher in a background thread and keeps the graph current on every save. That
+work is a **local parse — no LLM, no tokens, no per-session context cost** (the
+watcher lives in the server process, not in Claude's context); the only cost is
+a little background CPU. Off by default — the plain `wire` is a one-time build
+that goes stale until the next `agent-tools refresh`. Without `--watch`, Claude
+still refreshes the graph on demand: code-review-graph's own prompts have it
+call `detect_changes` before a review.
+
+**`unwire` leaves no residual trace.** It removes the MCP entry, deletes the
+`.code-review-graph/` index, strips the `.gitignore` rule it added, drops the
+repo from code-review-graph's global registry (`~/.code-review-graph`), and
+regenerates the AGENTS.md block without the code-review-graph section. Any
+background watch stops with the MCP server. `agent-tools uninstall
+code-review-graph` does all of that first, then removes the binary.
 
 ### token-savior
 

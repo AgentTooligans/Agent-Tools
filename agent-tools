@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.6.4
+VERSION=3.7.0
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -415,7 +415,11 @@ agent-tools — graphify + claude-mem, set up correctly, on any project.
   agent-tools uninstall NAME    remove one tool (or: all) — asks before
                                 deleting anything it recorded
   agent-tools wire NAME         add a tool's MCP to THIS project (crg|token-savior)
+    --watch                       code-review-graph only: keep its graph current
+                                  in the background (local parse, no tokens)
   agent-tools unwire NAME       remove it from this project
+                                (code-review-graph: also deletes its index,
+                                 .gitignore rule and registry entry — no trace)
   agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
   agent-tools pocock [CMD]      grill-me/handoff/wait-what: status|install|update|uninstall
   agent-tools update [WHAT]     update one thing, or everything installed
@@ -1570,15 +1574,24 @@ install_crg() {
     return 0
 }
 
-wire_crg() {
+wire_crg() {   # wire_crg [watch]   watch=1 -> start a background filesystem watch
     local r; r="$(repo_root)" || { c_bad "not a git repository"; return 1; }
+    local watch="${1:-0}" watchflag=""
     crg_installed || { c_bad "not installed — agent-tools install code-review-graph"; return 1; }
     have claude || { c_bad "claude CLI not found"; return 1; }
-    if claude mcp list 2>/dev/null | grep -q "^code-review-graph"; then
+    # --auto-watch runs a filesystem watcher in a daemon thread inside the MCP
+    # server, keeping the graph current on every save. It is a LOCAL parse (no
+    # LLM, no tokens) — the only cost is a little background CPU. Off by default.
+    if [ "$watch" = 1 ]; then
+        watchflag="--auto-watch"
+        # Re-add so the flag takes effect even if it was already wired without it.
+        mcp_wired_here "$r" code-review-graph && claude mcp remove code-review-graph -s local >/dev/null 2>&1
+    fi
+    if mcp_wired_here "$r" code-review-graph; then
         c_ok "code-review-graph MCP already wired here"
     else
-        claude mcp add code-review-graph -s local -- code-review-graph mcp --repo "$r" >/dev/null 2>&1 \
-            && c_ok "code-review-graph MCP wired (project scope, 30 tools)" \
+        claude mcp add code-review-graph -s local -- code-review-graph mcp --repo "$r" $watchflag >/dev/null 2>&1 \
+            && c_ok "code-review-graph MCP wired (project scope, 30 tools${watchflag:+, auto-watch})" \
             || { c_bad "claude mcp add failed"; return 1; }
     fi
     grep -q '^\.code-review-graph/' "$r/.gitignore" 2>/dev/null || {
@@ -1590,12 +1603,28 @@ wire_crg() {
 }
 
 unwire_crg() {
-    have claude || return 1
-    local r; r="$(repo_root)"
-    claude mcp remove code-review-graph -s local >/dev/null 2>&1 \
+    have claude && claude mcp remove code-review-graph -s local >/dev/null 2>&1 \
         && c_ok "code-review-graph MCP removed from this project" \
         || c_warn "no code-review-graph MCP entry here"
-    [ -n "$r" ] && sync_instructions "$r"   # drop its lines from the block
+    local r; r="$(repo_root)"
+    [ -n "$r" ] || return 0
+    # Leave NO residual trace of code-review-graph in this repo. Everything it
+    # writes is rebuildable, so removal is safe. (Its background watch, if any,
+    # lives in the MCP server process and dies when that server stops — removing
+    # the entry above stops it from starting again.)
+    [ -d "$r/.code-review-graph" ] && rm -rf "$r/.code-review-graph" \
+        && c_ok "removed .code-review-graph/ index"
+    if [ -f "$r/.gitignore" ] && grep -q '^\.code-review-graph/$' "$r/.gitignore" 2>/dev/null; then
+        grep -vE '^\.code-review-graph/$|^# code-review-graph index \(generated, rebuildable\)$' \
+            "$r/.gitignore" > "$r/.gitignore.tmp" \
+            && mv "$r/.gitignore.tmp" "$r/.gitignore" \
+            && c_ok "removed .gitignore rule"
+    fi
+    # Drop the repo from code-review-graph's own global registry (~/.code-review-graph),
+    # so `code-review-graph repos` no longer lists it and its watch-health is cleared.
+    have code-review-graph && code-review-graph unregister "$r" >/dev/null 2>&1 \
+        && c_ok "unregistered from code-review-graph"
+    sync_instructions "$r"   # drop its section from the managed block
 }
 
 install_ts() {
@@ -2576,11 +2605,16 @@ unwire_graphify() {
 }
 
 wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
-    local action="$1" name="${2:-}"
+    local action="$1"; shift
+    local name; name="$(first_nonflag "$@")"
+    # --watch (code-review-graph only): start a background filesystem watch so
+    # the graph stays current on save. Local parse, no tokens.
+    local watch=0 a
+    for a in "$@"; do [ "$a" = --watch ] && watch=1; done
     local t; t="$(resolve_tool "$name")" || {
-        c_bad "usage: agent-tools $action <graphify|code-review-graph|token-savior>"; return 2; }
+        c_bad "usage: agent-tools $action <graphify|code-review-graph|token-savior> [--watch]"; return 2; }
     case "$t:$action" in
-        code-review-graph:wire)   wire_crg ;;
+        code-review-graph:wire)   wire_crg "$watch" ;;
         code-review-graph:unwire) unwire_crg ;;
         token-savior:wire)        wire_ts ;;
         token-savior:unwire)      unwire_ts ;;
@@ -4185,8 +4219,8 @@ case "${1:-help}" in
     tools)             tools_cmd ;;
     install)           shift; install_tool_cmd "$(first_nonflag "$@")" ;;
     uninstall|remove)  shift; uninstall_tool_cmd "$(first_nonflag "$@")" ;;
-    wire)              shift; wire_tool_cmd wire "$(first_nonflag "$@")" ;;
-    unwire)            shift; wire_tool_cmd unwire "$(first_nonflag "$@")" ;;
+    wire)              shift; wire_tool_cmd wire "$@" ;;
+    unwire)            shift; wire_tool_cmd unwire "$@" ;;
     update|upgrade)    shift; update_cmd "$(first_nonflag "$@")" ;;
     migrate)           shift; migrate_cmd "${1:-}" "${2:-}" ;;
     init)              init_project ;;
