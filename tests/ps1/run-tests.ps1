@@ -376,6 +376,13 @@ Check "16b no stale agentmemory guidance in the wrapper" `
 Check "16c documents the pocock tool" ($src -match 'pocock') 'pocock not mentioned'
 Check "16d documents why Git Bash is the default" `
     ($src -match 'native Windows PATH') 'missing the native-PATH rationale'
+# The wrapper is a bootstrap: it must parse under stock Windows PowerShell 5.1,
+# which reads a BOM-less file as the ANSI codepage and mangles any UTF-8
+# multibyte char (a stray em dash once broke every string after it). Enforce
+# pure ASCII so encoding can never corrupt the parse.
+$nonAscii = ([System.IO.File]::ReadAllBytes($SCRIPT) | Where-Object { $_ -gt 127 }).Count
+Check "16e wrapper is pure ASCII (parses under Windows PowerShell 5.1)" `
+    ($nonAscii -eq 0) "found $nonAscii non-ASCII byte(s)"
 
 # ---------------------------------------------------------------------------
 Write-Host ($results -join "`n")

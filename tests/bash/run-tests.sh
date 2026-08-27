@@ -433,7 +433,7 @@ check "16d it says the graph was not overwritten" \
     $(grep -q 'NOT overwritten with partial results' "$AT" && echo 0 || echo 1)
 # Both extract paths must route failures through the explainer, not bare exit.
 check "16e both extract calls use the failure explainer" \
-    $([ "$(grep -c 'graphify_backend_args) *\(--mode deep \)\?|| semantic_pass_failed' "$AT")" = 2 ] && echo 0 || echo 1) \
+    $([ "$(grep -c 'graphify extract .*|| semantic_pass_failed' "$AT")" = 2 ] && echo 0 || echo 1) \
     "$(grep -n 'graphify extract' "$AT")"
 check "16f every backend graphify supports has a requirement rule" \
     $(for b in claude-cli openai gemini deepseek ollama; do

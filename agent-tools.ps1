@@ -11,7 +11,7 @@
   NATIVE Windows environment, so the tools agent-tools installs must be on the
   native Windows PATH. Git Bash shares Windows' HOME and PATH, so a tool it
   installs is visible to native Claude Code. A tool installed inside a WSL
-  distro is NOT — it lives in a separate Linux filesystem the native agent
+  distro is NOT - it lives in a separate Linux filesystem the native agent
   cannot see. So Git Bash is the correct default; WSL is only right when you
   also run Claude Code INSIDE WSL.
 
@@ -135,7 +135,7 @@ function Invoke-Wsl {
 
     # Translate the Windows CWD (C:\...) to the Linux view (/mnt/c/...). A UNC
     # path under \\wsl$ or \\wsl.localhost is ALREADY inside the distro, so
-    # wslpath would mangle it — fall back to the home directory and warn.
+    # wslpath would mangle it - fall back to the home directory and warn.
     $linuxCwd = $null
     if ($Cwd -match '^\\\\wsl') {
         Write-Host "  note: running from a \\wsl$ UNC path; using your WSL home instead." -ForegroundColor Yellow
@@ -179,11 +179,11 @@ if ($preferWsl) {
         Invoke-Wsl -ArgString $argString -Cwd $cwd   # exits
     }
     if ($gitBash) {
-        Write-Host "  note: -Wsl was requested but no WSL distro is installed — using Git Bash." -ForegroundColor Yellow
+        Write-Host "  note: -Wsl was requested but no WSL distro is installed - using Git Bash." -ForegroundColor Yellow
         Invoke-GitBash -Bash $gitBash -ArgString $argString -Cwd $cwd
     }
 } else {
-    # DEFAULT: Git Bash — its installs land on the native Windows PATH, so
+    # DEFAULT: Git Bash - its installs land on the native Windows PATH, so
     # native Claude Code can see the hooks and MCP servers agent-tools wires.
     if ($gitBash) {
         Invoke-GitBash -Bash $gitBash -ArgString $argString -Cwd $cwd   # exits
@@ -191,7 +191,7 @@ if ($preferWsl) {
     # No Git Bash. WSL works, but warn: it targets the WSL environment, so use
     # it only if your agent also runs inside the distro.
     if (Get-WslDistros) {
-        Write-Host "  note: no Git Bash found — using WSL." -ForegroundColor Yellow
+        Write-Host "  note: no Git Bash found - using WSL." -ForegroundColor Yellow
         Write-Host "        This installs INSIDE the distro. Native-Windows Claude Code will" -ForegroundColor Yellow
         Write-Host "        not see those tools; run Claude Code inside WSL, or install Git" -ForegroundColor Yellow
         Write-Host "        for Windows for native support." -ForegroundColor Yellow

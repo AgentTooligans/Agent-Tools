@@ -733,6 +733,29 @@ install_node_modern() {
     node_ok
 }
 
+# --- native-Windows bridge --------------------------------------------------
+# Under Git Bash the platform is "windows". Anything installed here has to be
+# usable by NATIVE-Windows Claude Code, which uses the Windows PATH and Windows
+# path syntax (C:\...), not the MSYS view (/c/...). These helpers bridge the two
+# worlds; on every other platform they are unused or pass input through as-is.
+win_powershell() {   # path to a PowerShell, or empty
+    command -v powershell.exe 2>/dev/null || command -v pwsh.exe 2>/dev/null \
+        || command -v powershell 2>/dev/null || command -v pwsh 2>/dev/null
+}
+win_pkg_mgr() {      # path to winget, or empty
+    command -v winget.exe 2>/dev/null || command -v winget 2>/dev/null
+}
+win_path() {         # render a filesystem path in Windows form on windows
+    if [ "$PLATFORM" = windows ] && have cygpath; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+win_cmd() {          # a tool's absolute .exe on windows, else the bare name
+    if [ "$PLATFORM" = windows ]; then
+        local p; p="$(command -v "$1" 2>/dev/null)"
+        [ -n "$p" ] && { win_path "$p"; return 0; }
+    fi
+    printf '%s' "$1"
+}
+
 install_node() {
     node_ok && return 0
     have_native node && return 0
@@ -754,7 +777,20 @@ install_node() {
                   *)   c_warn "node install did not succeed — install it yourself: https://nodejs.org" ;;
                 esac
             fi ;;
-        windows) c_bad "install Node from https://nodejs.org (or: winget install OpenJS.NodeJS)"; return 1 ;;
+        windows)
+            # winget ships on Windows 10 1809+/11 and installs a NATIVE Node
+            # onto the machine PATH, where native Claude Code (npx plugins) sees
+            # it. The current session's PATH is stale after the install, so add
+            # the default location by hand before re-checking.
+            local wg; wg="$(win_pkg_mgr)"
+            if [ -n "$wg" ]; then
+                "$wg" install --id OpenJS.NodeJS.LTS -e --source winget \
+                    --accept-package-agreements --accept-source-agreements >/dev/null 2>&1
+                export PATH="/c/Program Files/nodejs:$PATH"; hash -r 2>/dev/null || true
+            fi
+            if ! have_native node; then
+                c_bad "install Node from https://nodejs.org (or: winget install OpenJS.NodeJS.LTS)"; return 1
+            fi ;;
     esac
     have_native node
 }
@@ -763,6 +799,19 @@ install_uv() {
     have uv && return 0
     case "$PLATFORM" in
         macos) have brew && brew install uv && return 0 ;;
+        windows)
+            # The .sh installer is POSIX-only; on Windows the supported route is
+            # install.ps1, which drops a NATIVE uv.exe. `uv tool update-shell`
+            # then puts uv's bin dir on the Windows USER PATH — the same PATH
+            # native Claude Code uses to launch the MCP servers uv installs.
+            local ps; ps="$(win_powershell)"
+            if [ -n "$ps" ]; then
+                "$ps" -NoProfile -Command "irm https://astral.sh/uv/install.ps1 | iex" >/dev/null 2>&1
+            fi
+            export PATH="$HOME/.local/bin:$PATH"; hash -r 2>/dev/null || true
+            have uv && uv tool update-shell >/dev/null 2>&1
+            have uv || { c_bad "install uv manually: https://docs.astral.sh/uv/"; return 1; }
+            return 0 ;;
     esac
     # Astral's installer is the portable route on Linux/WSL and works on macOS.
     if have curl; then curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; fi
@@ -1604,7 +1653,7 @@ wire_crg() {   # wire_crg [watch]   watch=1 -> start a background filesystem wat
     if mcp_wired_here "$r" code-review-graph; then
         c_ok "code-review-graph MCP already wired here"
     else
-        claude mcp add code-review-graph -s local -- code-review-graph mcp --repo "$r" $watchflag >/dev/null 2>&1 \
+        claude mcp add code-review-graph -s local -- "$(win_cmd code-review-graph)" mcp --repo "$(win_path "$r")" $watchflag >/dev/null 2>&1 \
             && c_ok "code-review-graph MCP wired (project scope, 30 tools${watchflag:+, auto-watch})" \
             || { c_bad "claude mcp add failed"; return 1; }
     fi
@@ -1636,7 +1685,7 @@ unwire_crg() {
     fi
     # Drop the repo from code-review-graph's own global registry (~/.code-review-graph),
     # so `code-review-graph repos` no longer lists it and its watch-health is cleared.
-    have code-review-graph && code-review-graph unregister "$r" >/dev/null 2>&1 \
+    have code-review-graph && code-review-graph unregister "$(win_path "$r")" >/dev/null 2>&1 \
         && c_ok "unregistered from code-review-graph"
     sync_instructions "$r"   # drop its section from the managed block
 }
@@ -1677,10 +1726,10 @@ wire_ts() {
     # project under your home directory -- observed finding 10 on this machine,
     # including duplicates -- and indexes all of them.
     claude mcp add token-savior -s local \
-        -e "WORKSPACE_ROOTS=$r" \
+        -e "WORKSPACE_ROOTS=$(win_path "$r")" \
         -e TOKEN_SAVIOR_CLIENT=claude-code \
         -e TOKEN_SAVIOR_PROFILE=optimized \
-        -- token-savior >/dev/null 2>&1 \
+        -- "$(win_cmd token-savior)" >/dev/null 2>&1 \
         && c_ok "token-savior MCP wired (project scope, pinned to this repo)" \
         || { c_bad "claude mcp add failed"; return 1; }
     # token-savior writes .token-savior-cache.json into the repo root (its
