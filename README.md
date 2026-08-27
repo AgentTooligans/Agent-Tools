@@ -120,8 +120,14 @@ Tune the model, force a backend, or parallelize harder:
 ```bash
 AGENT_TOOLS_BACKEND=gemini agent-tools refresh          # force a specific backend
 GRAPHIFY_CLAUDE_CLI_MODEL=sonnet agent-tools refresh    # override the Haiku default (haiku|sonnet|opus|full model id)
-AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh           # run 8 chunks at once (default 4)
+AGENT_TOOLS_BACKEND=gemini AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh   # 8 chunks at once
 ```
+
+> **Concurrency only helps on an API backend.** graphify **forces the
+> `claude-cli` backend to run one chunk at a time** — parallel `claude -p`
+> subprocesses conflict over Claude Code session state — so
+> `AGENT_TOOLS_CONCURRENCY` is ignored there (refresh tells you when that
+> happens). Want parallelism? Use an API key backend.
 
 **`--code-only` is a real option, not a consolation prize.** It gives you the
 full structural graph — every function, class, import and call — which is what
@@ -623,8 +629,10 @@ repo size — code (the AST structure pass) is always free and near-instant.
 
 **What a "chunk" is.** The semantic pass packs your changed docs into chunks of
 up to ~60k tokens each and sends **one LLM request per chunk**. Roughly 17 docs
-per chunk. The chunks run in parallel — 4 at a time by default
-(`AGENT_TOOLS_CONCURRENCY` raises it).
+per chunk. On an API backend the chunks run in parallel — 4 at a time by default,
+raised with `AGENT_TOOLS_CONCURRENCY`. On `claude-cli` graphify **forces them
+serial** (one at a time), so a big first run there is slow no matter what
+concurrency you pass.
 
 **The startup cost you may have heard about is real, but only on `claude-cli`.**
 On that backend each chunk is a *fresh* `claude -p` process (no session reuse),

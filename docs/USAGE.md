@@ -31,11 +31,13 @@ chosen in this order:
 If none of those exist, `agent-tools refresh` refuses to start and points you
 at `--code-only`, which needs nothing.
 
-**Parallelism.** The semantic pass runs 4 chunks at once by default. Raise it
-with `AGENT_TOOLS_CONCURRENCY=8` — most effective on an API backend, where each
-chunk is a single HTTPS call. On `claude-cli` each chunk is a full `claude -p`
-process (it reloads the CLI's system prompt each time), so parallelism there is
-heavier and the label step is pinned to one at a time regardless.
+**Parallelism.** On an API backend the semantic pass runs 4 chunks at once by
+default; raise it with `AGENT_TOOLS_CONCURRENCY=8`. On `claude-cli` graphify
+**forces serial execution** (one chunk at a time) — parallel `claude -p`
+subprocesses conflict over Claude Code session state — so `AGENT_TOOLS_CONCURRENCY`
+is ignored there (refresh prints a notice when you set it on claude-cli). Each
+claude-cli chunk is also a full `claude -p` process that reloads the CLI's system
+prompt. Net: for a fast, parallel semantic pass, use an API key backend.
 
 > Earlier versions passed `--backend claude-cli` unconditionally. That
 > **overrode** graphify's own auto-detection, so a machine with a Gemini key

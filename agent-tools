@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.6.3
+VERSION=3.6.4
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -522,9 +522,9 @@ Env (refresh semantic pass):
   AGENT_TOOLS_BACKEND=gemini|openai|claude|deepseek|kimi|ollama|claude-cli
                   force a backend instead of auto-detecting from keys/CLI.
   AGENT_TOOLS_CONCURRENCY=N
-                  parallel semantic chunks (default 4). Best on an API
-                  backend; claude-cli runs heavy processes and forces the
-                  label step to 1 regardless.
+                  parallel semantic chunks (default 4). API backends only —
+                  graphify forces claude-cli to run serial (parallel claude -p
+                  sessions conflict), so it is ignored there.
 
 Memory backend (install-machine):
   --memory=claude-mem   default. light worker on :37701, context injection
@@ -3665,6 +3665,20 @@ refresh() {
         echo "  backend: $(graphify_backend_name)"
         [ -n "${GRAPHIFY_CLAUDE_CLI_MODEL:-}" ] \
             && echo "  claude-cli model: $GRAPHIFY_CLAUDE_CLI_MODEL"
+        # graphify FORCES max_concurrency=1 on claude-cli — parallel `claude -p`
+        # subprocesses conflict over session state (graphify llm.py). So a
+        # concurrency override does nothing there; say so rather than let the
+        # user believe 8 chunks are running in parallel when it is really 1.
+        if [ -n "${AGENT_TOOLS_CONCURRENCY:-}" ]; then
+            local _ch="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
+            if { [ -z "$_ch" ] && have claude; } || [ "$_ch" = claude-cli ]; then
+                c_warn "AGENT_TOOLS_CONCURRENCY=$AGENT_TOOLS_CONCURRENCY has NO effect on claude-cli"
+                c_warn "    graphify runs it serial there. For real parallelism use an API"
+                c_warn "    backend:  AGENT_TOOLS_BACKEND=gemini AGENT_TOOLS_CONCURRENCY=$AGENT_TOOLS_CONCURRENCY agent-tools refresh"
+            else
+                echo "  concurrency: $AGENT_TOOLS_CONCURRENCY chunks in parallel"
+            fi
+        fi
     fi
 
     hdr "1/3 structure"     # LAW: structure first, always
