@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.6.2
+VERSION=3.6.3
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -956,7 +956,7 @@ doctor() {
         if have claude; then
             # Not wired is the DEFAULT since 3.4.0, not a fault: the CLI
             # answers the same questions for no per-session cost.
-            claude mcp list 2>/dev/null | grep -q "^graphify" \
+            mcp_wired_here "$root" graphify \
                 && c_ok "graphify MCP wired (~1.5k tokens every session)" \
                 || c_ok "graphify MCP not wired — CLI mode (default, 0 tokens)"
             # claude-mem registers its own MCP entry, so there is nothing for
@@ -1873,13 +1873,13 @@ tool_status_line() {   # tool_status_line <name>
       code-review-graph)
         if crg_installed; then
             c_ok "code-review-graph $(uv_tool_version "$CRG_PKG") (opt-in)"
-            claude mcp list 2>/dev/null | grep -q "^code-review-graph" \
+            mcp_wired_here "$(repo_root 2>/dev/null)" code-review-graph \
                 && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire code-review-graph)"
         else c_warn "code-review-graph not installed (opt-in)"; fi ;;
       token-savior)
         if ts_installed; then
             c_ok "token-savior installed (opt-in)"
-            claude mcp list 2>/dev/null | grep -q "^token-savior" \
+            mcp_wired_here "$(repo_root 2>/dev/null)" token-savior \
                 && c_ok "  MCP wired in this project" || c_warn "  not wired here (agent-tools wire token-savior)"
         else c_warn "token-savior not installed (opt-in)"; fi ;;
     esac
@@ -3754,8 +3754,7 @@ print(name)" 2>/dev/null)"
     # installed AND wired here (its MCP entry, pinned to this repo, is the
     # marker — token-savior keeps no per-repo dir). Its `ts` CLI collides with
     # moreutils' `ts`, so invoke it unambiguously through uv.
-    if have token-savior && have claude \
-       && claude mcp list 2>/dev/null | grep -q "^token-savior"; then
+    if have token-savior && mcp_wired_here "$root" token-savior; then
         hdr "token-savior index"
         WORKSPACE_ROOTS="$root" uv tool run --from "$TS_PKG" ts daemon warm "$root" >/dev/null 2>&1 \
             && c_ok "token-savior daemon warmed for this repo" \
