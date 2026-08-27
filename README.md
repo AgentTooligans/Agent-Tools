@@ -837,7 +837,13 @@ cross-agent standard file — and that block contains **no `mcp__` tool names**.
 Because Claude Code reads `CLAUDE.md` (not `AGENTS.md`), init also creates a
 one-line `CLAUDE.md` that `@`-imports `AGENTS.md`, so Claude picks up the exact
 same instructions with nothing duplicated. `agent-tools doctor` verifies that
-import is in place. It teaches the CLI:
+import is in place.
+
+The block is **generated from what you've wired here**: graphify always, plus a
+`code-review-graph` or `token-savior` section only when that tool is wired.
+`wire` adds its lines, `unwire` removes them, and re-running `init` resyncs — so
+the agent is pointed at exactly the tools that exist in this repo. It teaches
+the CLI:
 
 ```bash
 graphify query "<question>"     graphify affected "<symbol>"     graphify god-nodes

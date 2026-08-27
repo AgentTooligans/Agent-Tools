@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.5.0
+VERSION=3.6.0
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -1586,13 +1586,16 @@ wire_crg() {
         c_ok "ignored .code-review-graph/"; }
     hdr "Building its graph (local parse, no LLM)"
     ( cd "$r" && code-review-graph build 2>&1 | tail -3 )
+    sync_instructions "$r"   # add its lines to the managed block (if one exists)
 }
 
 unwire_crg() {
     have claude || return 1
+    local r; r="$(repo_root)"
     claude mcp remove code-review-graph -s local >/dev/null 2>&1 \
         && c_ok "code-review-graph MCP removed from this project" \
         || c_warn "no code-review-graph MCP entry here"
+    [ -n "$r" ] && sync_instructions "$r"   # drop its lines from the block
 }
 
 install_ts() {
@@ -1625,7 +1628,7 @@ wire_ts() {
     ts_installed || { c_bad "not installed — agent-tools install token-savior"; return 1; }
     have claude || { c_bad "claude CLI not found"; return 1; }
     if claude mcp list 2>/dev/null | grep -q "^token-savior"; then
-        c_ok "token-savior MCP already wired here"; return 0
+        c_ok "token-savior MCP already wired here"; sync_instructions "$r"; return 0
     fi
     # WORKSPACE_ROOTS pinned to this repo. Left unset it auto-discovers every
     # project under your home directory -- observed finding 10 on this machine,
@@ -1643,13 +1646,16 @@ wire_ts() {
     grep -q '^\.token-savior-cache\.json$' "$r/.gitignore" 2>/dev/null || {
         printf '\n# token-savior index cache (generated, rebuildable)\n.token-savior-cache.json\n' >> "$r/.gitignore"
         c_ok "ignored .token-savior-cache.json"; }
+    sync_instructions "$r"   # add its lines to the managed block (if one exists)
 }
 
 unwire_ts() {
     have claude || return 1
+    local r; r="$(repo_root)"
     claude mcp remove token-savior -s local >/dev/null 2>&1 \
         && c_ok "token-savior MCP removed from this project" \
         || c_warn "no token-savior MCP entry here"
+    [ -n "$r" ] && sync_instructions "$r"   # drop its lines from the block
 }
 
 # ---------------------------------------------------------------------------
@@ -2992,6 +2998,153 @@ install_machine() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Managed instruction block — generated from what is WIRED in the repo.
+#
+# The block lives in AGENTS.md (the cross-agent source of truth); CLAUDE.md is a
+# one-line @-import so Claude Code, which reads CLAUDE.md, sees the same thing.
+# graphify is always present (the core); the code-review-graph and token-savior
+# sections appear ONLY when their MCP is wired here, so `wire`/`unwire` add and
+# remove the matching lines. Regenerated on init and on every wire/unwire.
+# ---------------------------------------------------------------------------
+render_managed_block() {   # render_managed_block <root>  -> block on stdout
+    local root="$1" crg=0 ts=0
+    [ -d "$root/.code-review-graph" ] && crg=1
+    if have claude; then
+        claude mcp list 2>/dev/null | grep -q "^code-review-graph" && crg=1
+        claude mcp list 2>/dev/null | grep -q "^token-savior"      && ts=1
+    fi
+    cat <<'HEAD'
+<!-- agent-tools:managed -->
+## Codebase knowledge (graphify)
+
+Before grepping or reading files broadly, ask the graph:
+
+    graphify query "<question>"        # scoped subgraph, cheap
+    graphify affected "<symbol>"       # blast radius before refactoring
+    graphify god-nodes                 # what is risky to touch at all
+    graphify path "<A>" "<B>"          # how two things connect
+    graphify explain "<concept>"       # one concept, focused
+
+If graphify-out/wiki/index.md exists, use it to navigate broadly. Read
+GRAPH_REPORT.md only for whole-architecture review — it is large.
+
+The graph covers code structure, docs and concepts. It does NOT index
+string-level details (CSS variables, literals) — use grep for those.
+If the graph looks stale, run `agent-tools refresh`.
+HEAD
+    if [ "$crg" = 1 ]; then
+        cat <<'CRG'
+
+## Code review (code-review-graph)
+
+For review- and impact-shaped questions, prefer code-review-graph:
+
+    code-review-graph query "<question>"    # scoped review context
+    code-review-graph impact "<symbol>"     # what a change ripples into
+    code-review-graph search "<text>"       # semantic node search
+
+It overlaps graphify — navigate with graphify, frame a review with this.
+CRG
+    fi
+    if [ "$ts" = 1 ]; then
+        cat <<'TS'
+
+## Symbol lookups (token-savior)
+
+For a symbol's source without reading whole files:
+
+    ts get "<symbol>"      # source of a function/class
+    ts search "<regex>"    # regex search across code
+    ts ctx "<symbol>"      # source + dependencies + callers
+TS
+    fi
+    cat <<'TAIL'
+
+## Memory
+
+Past sessions are searchable through the memory backend. Recall before
+re-deriving an earlier decision, and save durable decisions explicitly.
+Memory is for decisions and rationale; the graph is for what the code *is*.
+
+## Keep this file lean
+
+This file is read into context on EVERY session, so its size is a permanent
+tax on every request. Keep it to things that do not fit anywhere else:
+
+- build / test / lint / run commands
+- hard constraints and invariants that must never be violated
+- pointers to where the real documentation lives
+
+Do NOT put here: session logs, changelogs, status updates, narrative history,
+lists of what was done and when, or anything that reads like a diary. Those
+belong in the memory backend (decisions, rationale) or in docs/ (long-form).
+If a section is growing over time rather than being edited, it belongs
+somewhere else.
+<!-- /agent-tools:managed -->
+TAIL
+}
+
+# Remove the managed block (markers included) from a file, leaving the rest.
+strip_managed_block() {   # strip_managed_block <file>
+    local file="$1"
+    [ -f "$file" ] && grep -q 'agent-tools:managed' "$file" 2>/dev/null || return 0
+    awk '
+      /<!-- agent-tools:managed -->/ { inb=1; next }
+      /<!-- \/agent-tools:managed -->/ { inb=0; next }
+      inb { next }
+      { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
+# Write (or replace in place) the managed block in a file.
+write_managed_block() {   # write_managed_block <file> <root>
+    local file="$1" root="$2" blk
+    blk="$(mktemp)" || return 1
+    render_managed_block "$root" > "$blk"
+    if grep -q 'agent-tools:managed' "$file" 2>/dev/null; then
+        awk '
+          FNR==NR { b = b $0 ORS; next }
+          /<!-- agent-tools:managed -->/ { printf "%s", b; skip=1; next }
+          /<!-- \/agent-tools:managed -->/ { skip=0; next }
+          skip { next }
+          { print }
+        ' "$blk" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    else
+        [ -s "$file" ] && printf '\n' >> "$file"
+        cat "$blk" >> "$file"
+    fi
+    rm -f "$blk"
+}
+
+# Ensure CLAUDE.md exists and @-imports AGENTS.md at its top.
+ensure_claude_import() {   # ensure_claude_import <root>
+    local root="$1"
+    if [ ! -f "$root/CLAUDE.md" ]; then
+        printf '@AGENTS.md\n' > "$root/CLAUDE.md"
+    elif ! grep -q '^@AGENTS\.md[[:space:]]*$' "$root/CLAUDE.md" 2>/dev/null; then
+        { printf '@AGENTS.md\n'; cat "$root/CLAUDE.md"; } > "$root/CLAUDE.md.tmp" \
+            && mv "$root/CLAUDE.md.tmp" "$root/CLAUDE.md"
+    fi
+}
+
+# Regenerate the managed block to match current wiring. No-op when the user has
+# not opted in (no block anywhere) unless called with "create" (from init).
+sync_instructions() {   # sync_instructions <root> [create]
+    local root="$1" mode="${2:-}" has=0
+    grep -q 'agent-tools:managed' "$root/AGENTS.md" 2>/dev/null && has=1
+    grep -q 'agent-tools:managed' "$root/CLAUDE.md" 2>/dev/null && has=1
+    [ "$has" = 0 ] && [ "$mode" != create ] && return 0
+    # Migrate a legacy block that sits in CLAUDE.md with no import: the block
+    # belongs in AGENTS.md now, with CLAUDE.md reduced to the @-import.
+    if grep -q 'agent-tools:managed' "$root/CLAUDE.md" 2>/dev/null \
+       && ! grep -q '^@AGENTS\.md[[:space:]]*$' "$root/CLAUDE.md" 2>/dev/null; then
+        strip_managed_block "$root/CLAUDE.md"
+    fi
+    write_managed_block "$root/AGENTS.md" "$root"
+    ensure_claude_import "$root"
+}
+
 init_project() {
     local root; root="$(git rev-parse --show-toplevel 2>/dev/null)" || { c_bad "not a git repository"; exit 1; }
     cd "$root" || exit 1
@@ -3164,81 +3317,28 @@ HK
     # it is the file that bloats — putting a "keep this lean" rule in a
     # different file than the one growing is theatre. AGENTS.md is the
     # cross-agent standard, so it is the fallback and what we create fresh.
-    local instr=""
-    for f in CLAUDE.md AGENTS.md .cursorrules; do [ -f "$f" ] && { instr="$f"; break; }; done
-    [ -z "$instr" ] && instr="AGENTS.md"
     # `graphify claude install` writes its own "## graphify" section covering the
     # same ground. We do not call it (our block is a superset and stays portable),
     # but a user who ran it by hand ends up with both -- duplicate instructions in
     # the one file we ask to keep lean. Say so rather than quietly stacking.
-    if grep -q "^## graphify$" "$instr" 2>/dev/null; then
-        c_warn "$instr already has graphify's own section; ours repeats it"
-        c_warn "    graphify claude uninstall   # then re-run: agent-tools init"
-    fi
-    if grep -q "agent-tools:managed" "$instr" 2>/dev/null; then
-        c_ok "agent instructions already in $instr"
-    elif confirm "a short 'use the graph and memory' section in $instr"; then
-        cat >> "$instr" <<'INSTR'
-
-<!-- agent-tools:managed -->
-## Codebase knowledge (graphify)
-
-Before grepping or reading files broadly, ask the graph:
-
-    graphify query "<question>"        # scoped subgraph, cheap
-    graphify affected "<symbol>"       # blast radius before refactoring
-    graphify god-nodes                 # what is risky to touch at all
-    graphify path "<A>" "<B>"          # how two things connect
-    graphify explain "<concept>"       # one concept, focused
-
-If graphify-out/wiki/index.md exists, use it to navigate broadly. Read
-GRAPH_REPORT.md only for whole-architecture review — it is large.
-
-The graph covers code structure, docs and concepts. It does NOT index
-string-level details (CSS variables, literals) — use grep for those.
-If the graph looks stale, run `agent-tools refresh`.
-
-## Memory
-
-Past sessions are searchable through the memory backend. Recall before
-re-deriving an earlier decision, and save durable decisions explicitly.
-Memory is for decisions and rationale; the graph is for what the code *is*.
-
-## Keep this file lean
-
-This file is read into context on EVERY session, so its size is a permanent
-tax on every request. Keep it to things that do not fit anywhere else:
-
-- build / test / lint / run commands
-- hard constraints and invariants that must never be violated
-- pointers to where the real documentation lives
-
-Do NOT put here: session logs, changelogs, status updates, narrative history,
-lists of what was done and when, or anything that reads like a diary. Those
-belong in the memory backend (decisions, rationale) or in docs/ (long-form).
-If a section is growing over time rather than being edited, it belongs
-somewhere else.
-<!-- /agent-tools:managed -->
-INSTR
-        c_ok "agent instructions added to $instr"
-    fi
-
-    # Claude Code loads CLAUDE.md, NOT AGENTS.md. When our block lives in
-    # AGENTS.md (the cross-agent source of truth), Claude would never see it.
-    # Fix it automatically: make CLAUDE.md a one-line @-import of AGENTS.md
-    # (native syntax). CLAUDE.md stays a stub, AGENTS.md keeps the content,
-    # and every agent — Claude included — reads the same instructions.
-    if [ "$instr" = AGENTS.md ]; then
-        if [ ! -f CLAUDE.md ]; then
-            printf '@AGENTS.md\n' > CLAUDE.md
-            c_ok "created CLAUDE.md -> @AGENTS.md (so Claude Code loads it)"
-        elif ! grep -q '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null; then
-            { printf '@AGENTS.md\n'; cat CLAUDE.md; } > CLAUDE.md.tmp \
-                && mv CLAUDE.md.tmp CLAUDE.md \
-                && c_ok "added @AGENTS.md to top of CLAUDE.md"
-        else
-            c_ok "CLAUDE.md already imports @AGENTS.md"
+    local _f
+    for _f in AGENTS.md CLAUDE.md; do
+        if grep -q "^## graphify$" "$_f" 2>/dev/null; then
+            c_warn "$_f has graphify's own section; ours repeats it"
+            c_warn "    graphify claude uninstall   # then re-run: agent-tools init"
         fi
+    done
+    # The block is GENERATED from what is wired here (graphify always; CRG and
+    # token-savior sections only when wired), lives in AGENTS.md, and Claude Code
+    # gets it through a CLAUDE.md @-import. Re-running keeps it in sync as tools
+    # are wired/unwired.
+    if grep -q "agent-tools:managed" AGENTS.md 2>/dev/null \
+       || grep -q "agent-tools:managed" CLAUDE.md 2>/dev/null; then
+        sync_instructions "$root"
+        c_ok "agent instructions synced to current wiring (AGENTS.md; CLAUDE.md imports it)"
+    elif confirm "a generated 'use these tools' section in AGENTS.md (Claude Code reads it via CLAUDE.md)"; then
+        sync_instructions "$root" create
+        c_ok "agent instructions written to AGENTS.md; CLAUDE.md imports it"
     fi
 
     if [ -f graphify-out/graph.json ]; then

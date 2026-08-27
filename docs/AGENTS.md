@@ -176,6 +176,13 @@ The block `init` writes contains **no `mcp__` tool names** by design — it is
 host-neutral, so the same file works in Claude Code, Codex and Antigravity
 without editing.
 
+**The block is generated from what's wired in the repo.** graphify's section is
+always there; a `code-review-graph` section and a `token-savior` section appear
+only when each is wired here. `agent-tools wire code-review-graph` adds its
+lines, `unwire` removes them, and `agent-tools init` rewrites the block to match
+the current wiring — so an agent is told to use exactly the tools that are
+actually available, and never a tool you removed.
+
 Claude Code is the one host that reads `CLAUDE.md` rather than `AGENTS.md`, so
 `init` also writes a one-line `CLAUDE.md` containing `@AGENTS.md` — a native
 import. `AGENTS.md` stays the single source of truth; Claude picks it up through

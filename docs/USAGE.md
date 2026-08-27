@@ -175,10 +175,12 @@ the cheapest thing you can do is pin the plan down.
 
 **4. Project instructions (strongest).** Put it in the file your agent already
 reads — `AGENTS.md`, or `CLAUDE.md` for Claude Code. `agent-tools init` offers
-to add a short section for you, and — since Claude Code reads `CLAUDE.md`, not
-`AGENTS.md` — it also drops a one-line `CLAUDE.md` that `@`-imports `AGENTS.md`
-so Claude sees the same block with nothing duplicated. `agent-tools doctor`
-checks that import is present. Something like:
+to add a section for you, **generated from what's wired here** (graphify always;
+`code-review-graph` and `token-savior` lines only when wired — `wire`/`unwire`
+add and remove them, and re-running `init` resyncs). Since Claude Code reads
+`CLAUDE.md`, not `AGENTS.md`, it also drops a one-line `CLAUDE.md` that
+`@`-imports `AGENTS.md` so Claude sees the same block with nothing duplicated.
+`agent-tools doctor` checks that import is present. Something like:
 
 ```markdown
 ## Codebase knowledge
