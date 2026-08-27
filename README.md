@@ -101,19 +101,27 @@ you have four ways to provide one:
 
 | you have | what happens |
 |---|---|
-| the `claude` CLI | used automatically, no API key, billed to your existing subscription |
+| the `claude` CLI | used automatically, no API key, billed to your existing subscription. Runs the **Haiku** model by default — fast and cheap. (graphify's own default is Opus, which is overkill for structured extraction; Agent Tools overrides it to Haiku.) |
 | any API key (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`) | detected automatically |
 | ollama on `:11434` | used automatically, fully local, no account |
 | none of the above | `agent-tools refresh --code-only` — pure local parsing, no model, no cost |
 
-Force a specific one any time:
-
-```bash
-AGENT_TOOLS_BACKEND=gemini agent-tools refresh
-```
+**Only have Codex (or Cursor, Gemini CLI, …) and no `claude`?** Still works.
+The `claude` CLI is never required — it's just one of the four options above.
+Codex itself is not a graphify backend, so set the API key you already use
+(Codex users usually have `OPENAI_API_KEY`) and it's detected automatically, or
+run `--code-only` and skip the model entirely.
 
 If you start a semantic pass with no model available, it stops immediately and
 tells you these options rather than failing halfway through.
+
+Tune the model, force a backend, or parallelize harder:
+
+```bash
+AGENT_TOOLS_BACKEND=gemini agent-tools refresh          # force a specific backend
+GRAPHIFY_CLAUDE_CLI_MODEL=sonnet agent-tools refresh    # override the Haiku default (haiku|sonnet|opus|full model id)
+AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh           # run 8 chunks at once (default 4)
+```
 
 **`--code-only` is a real option, not a consolation prize.** It gives you the
 full structural graph — every function, class, import and call — which is what
@@ -584,6 +592,17 @@ that no longer exists.
 A refresh is **free when nothing changed**: unchanged files come from a
 content-keyed cache. You only pay for docs you actually edited.
 
+**`refresh` updates every graph you've wired into the repo, and only those.**
+
+| wired here | what refresh does |
+|---|---|
+| graphify (`graphify-out/graph.json` present) | structure → docs → community names |
+| code-review-graph (`agent-tools wire code-review-graph`) | rebuilds its index (`code-review-graph build`) — local AST, no LLM |
+| token-savior (`agent-tools wire token-savior`) | warms its daemon so it re-reads the current code |
+
+A repo with only code-review-graph and no graphify graph refreshes just
+code-review-graph — no stray LLM run. Nothing you haven't wired is touched.
+
 ### Long runs
 
 ```bash
@@ -600,10 +619,34 @@ on Linux/WSL (self-cleaning), `caffeinate` + `nohup` on macOS so idle sleep
 can't pause a long run, and plain `nohup` elsewhere.
 
 **How long does a refresh take?** It depends entirely on **uncached docs**, not
-repo size — code is always free. Roughly 17 docs per LLM chunk and ~5 minutes
-per chunk on the serial `claude-cli` backend, so ~400 cold documents is ~2
-hours. A repo whose docs are already cached finishes in seconds. `status` shows
-chunk progress while it runs.
+repo size — code (the AST structure pass) is always free and near-instant.
+
+**What a "chunk" is.** The semantic pass packs your changed docs into chunks of
+up to ~60k tokens each and sends **one LLM request per chunk**. Roughly 17 docs
+per chunk. The chunks run in parallel — 4 at a time by default
+(`AGENT_TOOLS_CONCURRENCY` raises it).
+
+**The startup cost you may have heard about is real, but only on `claude-cli`.**
+On that backend each chunk is a *fresh* `claude -p` process (no session reuse),
+so every chunk reloads Claude Code's whole system prompt and tool schemas —
+on the order of ~10k tokens of fixed overhead *before* your content, every
+chunk. It is not a Task/subagent; it's a full CLI process per chunk. That
+overhead is why a big first run is slow, and why the `claude-cli` label step is
+forced to run one-at-a-time.
+
+**On an API backend a chunk is just one HTTPS call** — no CLI, no 10k reload,
+only graphify's small extraction prompt plus your content. So the fastest big
+semantic pass is an API key + higher concurrency:
+
+```bash
+AGENT_TOOLS_BACKEND=gemini AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh
+```
+
+Ballpark on the serial `claude-cli` backend: ~1–2 minutes per chunk with the
+default Haiku model (Opus was ~5), so ~400 cold docs is well under an hour. A
+repo whose docs are already cached finishes in seconds. `status` shows chunk
+progress while it runs. And nothing here touches code — only edited docs cost
+anything, and `--code-only` costs nothing at all.
 
 To auto-refresh the code graph on every commit:
 
@@ -791,7 +834,10 @@ the rest on the CLI.
 
 `agent-tools init` writes its instruction block into **`AGENTS.md`** — the
 cross-agent standard file — and that block contains **no `mcp__` tool names**.
-It teaches the CLI:
+Because Claude Code reads `CLAUDE.md` (not `AGENTS.md`), init also creates a
+one-line `CLAUDE.md` that `@`-imports `AGENTS.md`, so Claude picks up the exact
+same instructions with nothing duplicated. `agent-tools doctor` verifies that
+import is in place. It teaches the CLI:
 
 ```bash
 graphify query "<question>"     graphify affected "<symbol>"     graphify god-nodes

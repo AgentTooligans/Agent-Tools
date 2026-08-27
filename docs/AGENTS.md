@@ -176,6 +176,13 @@ The block `init` writes contains **no `mcp__` tool names** by design — it is
 host-neutral, so the same file works in Claude Code, Codex and Antigravity
 without editing.
 
+Claude Code is the one host that reads `CLAUDE.md` rather than `AGENTS.md`, so
+`init` also writes a one-line `CLAUDE.md` containing `@AGENTS.md` — a native
+import. `AGENTS.md` stays the single source of truth; Claude picks it up through
+that import with nothing duplicated. `agent-tools doctor` verifies the import is
+present (and warns if a repo has the block in `AGENTS.md` but no `CLAUDE.md`
+importing it, which would leave Claude Code unaware of it).
+
 ### Giving an agent the graphify skill
 
 `graphify install --platform <name>` copies its skill into that host's config
@@ -342,6 +349,12 @@ shows what is installed globally; if Codex does not see them, check that
 It wires **Claude Code** (`claude mcp add ... -s local`) because that is what it
 can verify. For any other host, run the `connect` / `install` commands above —
 they are one-liners, and both tools are already installed and running.
+
+It writes the instruction block into `AGENTS.md` (or into `CLAUDE.md` if that
+already exists), and when the block lands in `AGENTS.md` it also creates a
+one-line `CLAUDE.md` that `@`-imports it — otherwise Claude Code, which reads
+`CLAUDE.md` and not `AGENTS.md`, would never see the block. Re-running `init` is
+idempotent: it adds the import if missing and leaves it alone otherwise.
 
 ### Why it does not call `graphify claude install` or `graphify hook install`
 

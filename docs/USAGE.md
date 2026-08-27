@@ -19,12 +19,23 @@ chosen in this order:
    explicit choice always wins.
 2. **`claude-cli`**, if the `claude` CLI is installed — no API key, billed to
    an existing subscription, so it's free at the margin for people who have it.
+   It runs the **Haiku** model by default (graphify's own default is Opus,
+   overkill for structured extraction). Override with
+   `GRAPHIFY_CLAUDE_CLI_MODEL=sonnet` (or `opus`, or a full model id).
 3. **Whatever API key you have.** graphify auto-detects from `GEMINI_API_KEY`,
    `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` and friends.
+   No `claude` CLI needed — a Codex-only user with `OPENAI_API_KEY` lands here
+   automatically (there is no `codex` backend; the `openai` one is used).
 4. **A local ollama** on `:11434`.
 
 If none of those exist, `agent-tools refresh` refuses to start and points you
 at `--code-only`, which needs nothing.
+
+**Parallelism.** The semantic pass runs 4 chunks at once by default. Raise it
+with `AGENT_TOOLS_CONCURRENCY=8` — most effective on an API backend, where each
+chunk is a single HTTPS call. On `claude-cli` each chunk is a full `claude -p`
+process (it reloads the CLI's system prompt each time), so parallelism there is
+heavier and the label step is pinned to one at a time regardless.
 
 > Earlier versions passed `--backend claude-cli` unconditionally. That
 > **overrode** graphify's own auto-detection, so a machine with a Gemini key
@@ -164,7 +175,10 @@ the cheapest thing you can do is pin the plan down.
 
 **4. Project instructions (strongest).** Put it in the file your agent already
 reads — `AGENTS.md`, or `CLAUDE.md` for Claude Code. `agent-tools init` offers
-to add a short section for you. Something like:
+to add a short section for you, and — since Claude Code reads `CLAUDE.md`, not
+`AGENTS.md` — it also drops a one-line `CLAUDE.md` that `@`-imports `AGENTS.md`
+so Claude sees the same block with nothing duplicated. `agent-tools doctor`
+checks that import is present. Something like:
 
 ```markdown
 ## Codebase knowledge
@@ -209,6 +223,12 @@ agent-tools refresh --code-only   # structure only, free, ~1 min
 agent-tools refresh               # + docs/images + community naming
 agent-tools refresh --deep        # + aggressive inferred edges
 ```
+
+`refresh` also updates the other graphs you've wired into the repo — it runs
+`code-review-graph build` when code-review-graph is wired, and warms the
+token-savior daemon when that is wired. A repo with only code-review-graph and
+no graphify graph refreshes just code-review-graph: refresh touches only what
+you've actually wired, and nothing else.
 
 `--deep` is worth it when you want the graph to connect *concepts* across prose
 and code rather than just structure. It is the most expensive thing here: its

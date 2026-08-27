@@ -511,6 +511,21 @@ Flags (refresh):
   --detach        run in the background, surviving the terminal. Combines
                   with the others: `refresh --deep --detach`.
 
+  refresh also rebuilds code-review-graph and warms token-savior when each
+  is wired into the repo, and skips graphify entirely when the repo has no
+  graphify graph -- it touches only what you have wired here.
+
+Env (refresh semantic pass):
+  GRAPHIFY_CLAUDE_CLI_MODEL=haiku|sonnet|opus|<id>
+                  model for the claude-cli backend. Defaults to haiku
+                  (graphify's own default is Opus, overkill for extraction).
+  AGENT_TOOLS_BACKEND=gemini|openai|claude|deepseek|kimi|ollama|claude-cli
+                  force a backend instead of auto-detecting from keys/CLI.
+  AGENT_TOOLS_CONCURRENCY=N
+                  parallel semantic chunks (default 4). Best on an API
+                  backend; claude-cli runs heavy processes and forces the
+                  label step to 1 regardless.
+
 Memory backend (install-machine):
   --memory=claude-mem   default. light worker on :37701, context injection
   --memory=none         graphify only, nothing captures sessions

@@ -310,7 +310,11 @@ code-review-graph watch                 # keep it current while you work
 ```
 
 Its index lives in `.code-review-graph/` and `wire` adds a `.gitignore` rule —
-it is rebuildable in seconds, so committing it is churn.
+it is rebuildable in seconds, so committing it is churn. `install` pulls it as
+`code-review-graph[communities]`, so `igraph` comes with it and community
+detection uses the Leiden algorithm rather than the slower file-based fallback.
+Once wired, `agent-tools refresh` rebuilds this index alongside the graphify
+graph (local AST parse, no LLM).
 
 ### token-savior
 
@@ -334,6 +338,14 @@ Two details `agent-tools` handles for you:
 - **`WORKSPACE_ROOTS` is pinned to the repo you wire it in.** Left unset it
   auto-discovers every project under your home directory — it found ten on the
   machine this was written on, including duplicates — and indexes all of them.
+- **`wire` gitignores `.token-savior-cache.json`.** token-savior writes that
+  per-repo cache into the repo root; it is rebuildable, so committing it is
+  churn.
+
+Unlike graphify and code-review-graph, token-savior has no snapshot to
+rebuild — it indexes lazily through a file-watching daemon. So when it is wired,
+`agent-tools refresh` **warms its daemon** (`ts daemon warm`) to make it re-read
+the current code, rather than running a build step.
 
 Also note **`ts` collides with moreutils' `ts`** timestamper. Use the full
 `token-savior` name; `agent-tools` warns when the `ts` on your PATH is the
