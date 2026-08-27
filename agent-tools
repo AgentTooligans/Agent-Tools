@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.6.1
+VERSION=3.6.2
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -3007,13 +3007,34 @@ install_machine() {
 # sections appear ONLY when their MCP is wired here, so `wire`/`unwire` add and
 # remove the matching lines. Regenerated on init and on every wire/unwire.
 # ---------------------------------------------------------------------------
+# Is <name> wired as a LOCAL-scope MCP server for <root>? Reads the static
+# config (~/.claude.json -> projects[<root>].mcpServers) rather than
+# `claude mcp list`, which runs a live health check: that is slow and, if a
+# server is briefly unhealthy, its line can be missing — which would make the
+# block silently drop a tool that is actually wired. Falls back to the live
+# list only when no python is available to parse the JSON.
+mcp_wired_here() {   # mcp_wired_here <root> <name>
+    local root="$1" name="$2" cfg="$HOME/.claude.json"
+    if [ -n "${PY:-}" ] && [ -f "$cfg" ]; then
+        "$PY" - "$cfg" "$root" "$name" <<'PY' 2>/dev/null
+import json, sys
+cfg, root, name = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(cfg))
+except Exception:
+    sys.exit(1)
+srv = ((d.get("projects", {}) or {}).get(root, {}) or {}).get("mcpServers", {}) or {}
+sys.exit(0 if name in srv else 1)
+PY
+        return $?
+    fi
+    have claude && claude mcp list 2>/dev/null | grep -q "^$name"
+}
+
 render_managed_block() {   # render_managed_block <root>  -> block on stdout
     local root="$1" crg=0 ts=0
-    [ -d "$root/.code-review-graph" ] && crg=1
-    if have claude; then
-        claude mcp list 2>/dev/null | grep -q "^code-review-graph" && crg=1
-        claude mcp list 2>/dev/null | grep -q "^token-savior"      && ts=1
-    fi
+    { [ -d "$root/.code-review-graph" ] || mcp_wired_here "$root" code-review-graph; } && crg=1
+    mcp_wired_here "$root" token-savior && ts=1
     cat <<'HEAD'
 <!-- agent-tools:managed -->
 ## Codebase knowledge (graphify)
@@ -3135,12 +3156,11 @@ sync_instructions() {   # sync_instructions <root> [create]
     grep -q 'agent-tools:managed' "$root/AGENTS.md" 2>/dev/null && has=1
     grep -q 'agent-tools:managed' "$root/CLAUDE.md" 2>/dev/null && has=1
     [ "$has" = 0 ] && [ "$mode" != create ] && return 0
-    # Migrate a legacy block that sits in CLAUDE.md with no import: the block
-    # belongs in AGENTS.md now, with CLAUDE.md reduced to the @-import.
-    if grep -q 'agent-tools:managed' "$root/CLAUDE.md" 2>/dev/null \
-       && ! grep -q '^@AGENTS\.md[[:space:]]*$' "$root/CLAUDE.md" 2>/dev/null; then
-        strip_managed_block "$root/CLAUDE.md"
-    fi
+    # The block belongs in AGENTS.md, never in CLAUDE.md. Strip ANY copy from
+    # CLAUDE.md — from a legacy agent-tools, from `graphify claude install`, or
+    # from an earlier version of this tool that left both — so it can never live
+    # in two files at once. strip_managed_block is a no-op when there is none.
+    strip_managed_block "$root/CLAUDE.md"
     write_managed_block "$root/AGENTS.md" "$root"
     ensure_claude_import "$root"
 }
