@@ -7,6 +7,11 @@
   and deletes it on the way out. Runs anywhere pwsh 7 exists -- macOS, Linux
   and Windows -- because the stubs are shell scripts, not real binaries.
 
+  CONTRACT UNDER TEST (agent-tools 3.8.1+): Git Bash is the DEFAULT, because a
+  tool it installs lands on the native Windows PATH where native Claude Code
+  can see it. WSL is opt-in (-Wsl or $env:AGENT_TOOLS_USE_WSL) because its
+  installs live inside the distro, invisible to a native-Windows agent.
+
   Usage:   pwsh -File tests/ps1/run-tests.ps1
            pwsh -File tests/ps1/run-tests.ps1 -Target /path/to/agent-tools.ps1
 #>
@@ -27,7 +32,7 @@ $SCRIPT = (Resolve-Path $Target).Path
 # Build the fake world.
 # ---------------------------------------------------------------------------
 $ENVDIR = Join-Path ([System.IO.Path]::GetTempPath()) ("at-ps1-tests-" + [guid]::NewGuid().ToString('N').Substring(0,8))
-foreach ($d in 'bin','log','none','pf/Git/bin','pfx86/Git/bin','lad/Programs/Git/bin') {
+foreach ($d in 'bin','log','none','pf/Git/bin','pfx86/Git/bin','lad/Programs/Git/bin','scoop/scoop/apps/git/current/bin') {
     New-Item -ItemType Directory -Force -Path (Join-Path $ENVDIR $d) | Out-Null
 }
 
@@ -67,10 +72,11 @@ function Write-Stub {
     Set-Content -Path $Path -Value $Body -NoNewline
     if ($IsMacOS -or $IsLinux) { & chmod 755 $Path }
 }
-Write-Stub (Join-Path $ENVDIR 'bin/wsl.exe')                  $wslStub
-Write-Stub (Join-Path $ENVDIR 'pf/Git/bin/bash.exe')          $bashStub
-Write-Stub (Join-Path $ENVDIR 'pfx86/Git/bin/bash.exe')       $bashStub
+Write-Stub (Join-Path $ENVDIR 'bin/wsl.exe')                   $wslStub
+Write-Stub (Join-Path $ENVDIR 'pf/Git/bin/bash.exe')           $bashStub
+Write-Stub (Join-Path $ENVDIR 'pfx86/Git/bin/bash.exe')        $bashStub
 Write-Stub (Join-Path $ENVDIR 'lad/Programs/Git/bin/bash.exe') $bashStub
+Write-Stub (Join-Path $ENVDIR 'scoop/scoop/apps/git/current/bin/bash.exe') $bashStub
 
 $env:STUB_LOG = Join-Path $ENVDIR 'log'
 $pass = 0; $fail = 0; $results = @()
@@ -83,15 +89,21 @@ function Reset-Env {
     $env:ProgramFiles = "$ENVDIR/none"
     ${env:ProgramFiles(x86)} = "$ENVDIR/none"
     $env:LOCALAPPDATA = "$ENVDIR/none"
+    $env:USERPROFILE  = "$ENVDIR/none"
+    $env:AGENT_TOOLS_USE_WSL = ''
     $env:PATH = "/usr/bin:/bin"        # no wsl.exe unless a test adds it
     Remove-Item "$ENVDIR/log/wsl.args" -ErrorAction SilentlyContinue
 }
 
 function Invoke-Target {
-    param([string[]]$TargetArgs = @())
+    param([string[]]$TargetArgs = @(), [switch]$ForceWsl)
     # *>&1 not 2>&1: the wrapper uses Write-Host, which goes to the INFORMATION
     # stream (6), not stdout or stderr. 2>&1 alone silently captures nothing.
-    $out = & $SCRIPT @TargetArgs *>&1 | Out-String
+    if ($ForceWsl) {
+        $out = & $SCRIPT -Wsl @TargetArgs *>&1 | Out-String
+    } else {
+        $out = & $SCRIPT @TargetArgs *>&1 | Out-String
+    }
     return [pscustomobject]@{ Output = $out; Code = $LASTEXITCODE }
 }
 
@@ -111,172 +123,259 @@ Write-Host "target: $SCRIPT"
 Write-Host "sandbox: $ENVDIR`n"
 
 # ---------------------------------------------------------------------------
-# 1. Neither WSL nor Git Bash present
+# 1. Neither Git Bash nor WSL present
 # ---------------------------------------------------------------------------
 Reset-Env
 $r = Invoke-Target @('doctor')
-Check "1a no-WSL/no-GitBash: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
-Check "1b no-WSL/no-GitBash: explains both are missing" `
-    ($r.Output -match 'Neither WSL nor Git Bash') $r.Output
-Check "1c no-WSL/no-GitBash: suggests wsl --install" `
+Check "1a no-shell: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
+Check "1b no-shell: explains both are missing" `
+    ($r.Output -match 'Neither Git Bash nor WSL') $r.Output
+Check "1c no-shell: recommends installing Git" `
+    ($r.Output -match 'Git\.Git|Git for Windows') $r.Output
+Check "1d no-shell: still mentions WSL as the opt-in alternative" `
     ($r.Output -match 'wsl --install') $r.Output
 
 # ---------------------------------------------------------------------------
-# 2. wsl.exe exists but NO distro installed -> must fall through to Git Bash
-#    (this is the branch that would otherwise run commands into nothing)
+# 2. DEFAULT: Git Bash wins even when a WSL distro is available. This is the
+#    whole point of the flip -- native installs must land on the Windows PATH.
+# ---------------------------------------------------------------------------
+Reset-Env
+$env:PATH = "$ENVDIR/bin:/usr/bin:/bin"     # wsl.exe reachable
+$env:STUB_DISTROS = 'Ubuntu'                # a real distro exists
+$env:ProgramFiles = "$ENVDIR/pf"            # Git Bash also present
+$r = Invoke-Target @('version')
+Check "2a both present: uses Git Bash by default" `
+    ($r.Output -match 'GITBASH_RAN') $r.Output
+Check "2b both present: does NOT touch WSL" `
+    ($r.Output -notmatch 'WSL_RAN') $r.Output
+
+# ---------------------------------------------------------------------------
+# 3. -Wsl forces the WSL path even when Git Bash is present.
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
-$env:STUB_DISTROS = ''                    # `wsl -l -q` prints nothing
+$env:STUB_DISTROS = 'Ubuntu'
 $env:ProgramFiles = "$ENVDIR/pf"
-$r = Invoke-Target @('version')
-Check "2a wsl-present/no-distro: falls through to Git Bash" `
-    ($r.Output -match 'GITBASH_RAN') $r.Output
-Check "2b wsl-present/no-distro: says why it used Git Bash" `
-    ($r.Output -match 'no WSL distro found') $r.Output
+$r = Invoke-Target @('version') -ForceWsl
+Check "3a -Wsl: routes to WSL despite Git Bash present" `
+    ($r.Output -match 'WSL_RAN') $r.Output
+Check "3b -Wsl: does not use Git Bash" `
+    ($r.Output -notmatch 'GITBASH_RAN') $r.Output
 
 # ---------------------------------------------------------------------------
-# 3. `wsl -l -q` emits UTF-16 with NUL bytes -- the script strips them.
-#    A NUL-padded distro name must still count as "a distro exists".
+# 4. $env:AGENT_TOOLS_USE_WSL=1 forces WSL, same as the switch.
+# ---------------------------------------------------------------------------
+Reset-Env
+$env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
+$env:STUB_DISTROS = 'Ubuntu'
+$env:ProgramFiles = "$ENVDIR/pf"
+$env:AGENT_TOOLS_USE_WSL = '1'
+$r = Invoke-Target @('version')
+Check "4a env AGENT_TOOLS_USE_WSL=1: routes to WSL" `
+    ($r.Output -match 'WSL_RAN') $r.Output
+Check "4b env AGENT_TOOLS_USE_WSL=1: not Git Bash" `
+    ($r.Output -notmatch 'GITBASH_RAN') $r.Output
+
+# ---------------------------------------------------------------------------
+# 5. -Wsl requested but no distro installed -> fall back to Git Bash, with a note.
+# ---------------------------------------------------------------------------
+Reset-Env
+$env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
+$env:STUB_DISTROS = ''                       # wsl.exe present, no distro
+$env:ProgramFiles = "$ENVDIR/pf"
+$r = Invoke-Target @('version') -ForceWsl
+Check "5a -Wsl/no-distro: falls back to Git Bash" `
+    ($r.Output -match 'GITBASH_RAN') $r.Output
+Check "5b -Wsl/no-distro: explains the fallback" `
+    ($r.Output -match 'no WSL distro') $r.Output
+
+# ---------------------------------------------------------------------------
+# 6. No Git Bash, but a WSL distro exists -> use WSL, and WARN that it targets
+#    the distro (native Claude Code will not see those tools).
+# ---------------------------------------------------------------------------
+Reset-Env
+$env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
+$env:STUB_DISTROS = 'Ubuntu'
+# ProgramFiles stays "none" -> no Git Bash
+$r = Invoke-Target @('version')
+Check "6a no-GitBash/WSL-present: uses WSL" `
+    ($r.Output -match 'WSL_RAN') $r.Output
+Check "6b no-GitBash/WSL-present: warns install lands inside the distro" `
+    ($r.Output -match 'inside the distro|no Git Bash') $r.Output
+
+# ---------------------------------------------------------------------------
+# 7. `wsl -l -q` emits UTF-16 with NUL bytes -- the script strips them, so a
+#    NUL-padded distro name still counts (relevant to the no-GitBash fallback).
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
 $env:STUB_DISTROS = "U`0b`0u`0n`0t`0u`0"
-$env:STUB_HAS_AT  = '1'
 $r = Invoke-Target @('version')
-Check "3a NUL-padded distro list: detected as a real distro" `
+Check "7a NUL-padded distro list: detected as a real distro" `
     ($r.Output -match 'WSL_RAN') $r.Output
-Check "3b NUL-padded distro list: does not fall through to Git Bash" `
-    ($r.Output -notmatch 'GITBASH_RAN') $r.Output
 
 # ---------------------------------------------------------------------------
-# 4. WSL + distro, but agent-tools is NOT installed inside it
+# 8. WSL selected but agent-tools is NOT installed inside it (forced via -Wsl).
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
 $env:STUB_DISTROS = 'Ubuntu'
 $env:STUB_HAS_AT  = '0'
-$r = Invoke-Target @('doctor')
-Check "4a WSL without agent-tools: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
-Check "4b WSL without agent-tools: says it is missing in WSL" `
+$r = Invoke-Target @('doctor') -ForceWsl
+Check "8a WSL without agent-tools: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
+Check "8b WSL without agent-tools: says it is missing in WSL" `
     ($r.Output -match 'not installed in WSL') $r.Output
-Check "4c WSL without agent-tools: gives the install recipe" `
+Check "8c WSL without agent-tools: gives the install recipe" `
     ($r.Output -match './install.sh') $r.Output
-Check "4d WSL without agent-tools: does NOT run the command anyway" `
+Check "8d WSL without agent-tools: does NOT run the command anyway" `
     ($r.Output -notmatch 'WSL_RAN') $r.Output
 
 # ---------------------------------------------------------------------------
-# 5. Happy path: WSL + distro + agent-tools present
+# 9. WSL happy path (forced): marshalling + cwd translation + PATH fix.
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
 $env:STUB_DISTROS = 'Ubuntu'
-$env:STUB_HAS_AT  = '1'
-$r = Invoke-Target @('install','pocock')
-Check "5a WSL happy path: command reaches the Linux side" `
+$r = Invoke-Target @('install','pocock') -ForceWsl
+Check "9a WSL happy path: command reaches the Linux side" `
     ($r.Output -match 'WSL_RAN') $r.Output
-Check "5b WSL happy path: prepends ~/.local/bin to PATH" `
+Check "9b WSL happy path: prepends ~/.local/bin to PATH" `
     ($r.Output -match 'export PATH="\$HOME/\.local/bin:\$PATH"') $r.Output
-Check "5c WSL happy path: cd's into the translated Linux cwd" `
+Check "9c WSL happy path: cd's into the translated Linux cwd" `
     ($r.Output -match "cd '/mnt/c/faked") $r.Output
-Check "5d WSL happy path: passes the subcommand and its argument" `
+Check "9d WSL happy path: passes the subcommand and its argument" `
     ($r.Output -match "agent-tools 'install' 'pocock'") $r.Output
 
 # ---------------------------------------------------------------------------
-# 6. Exit-code propagation from the Linux side
+# 10. Exit-code propagation from both back-ends.
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
 $env:STUB_DISTROS = 'Ubuntu'
-$env:STUB_HAS_AT  = '1'
 $env:STUB_EXIT    = '3'
-$r = Invoke-Target @('doctor')
-Check "6a WSL: propagates a non-zero exit code" ($r.Code -eq 3) "got exit $($r.Code)"
+$r = Invoke-Target @('doctor') -ForceWsl
+Check "10a WSL: propagates a non-zero exit code" ($r.Code -eq 3) "got exit $($r.Code)"
 
 Reset-Env
-$env:PATH = "/usr/bin:/bin"
 $env:ProgramFiles = "$ENVDIR/pf"
 $env:STUB_EXIT = '4'
 $r = Invoke-Target @('doctor')
-Check "6b Git Bash: propagates a non-zero exit code" ($r.Code -eq 4) "got exit $($r.Code)"
+Check "10b Git Bash: propagates a non-zero exit code" ($r.Code -eq 4) "got exit $($r.Code)"
 
 # ---------------------------------------------------------------------------
-# 7. Git Bash discovered at each of the three candidate locations
+# 11. Git Bash discovered at each candidate location, including scoop.
 # ---------------------------------------------------------------------------
 foreach ($case in @(
-    @{ Name='ProgramFiles';       Var='ProgramFiles'; Path="$ENVDIR/pf" },
-    @{ Name='ProgramFiles(x86)';  Var='ProgramFiles(x86)'; Path="$ENVDIR/pfx86" },
-    @{ Name='LOCALAPPDATA';       Var='LOCALAPPDATA'; Path="$ENVDIR/lad" }
+    @{ Name='ProgramFiles';      Var='ProgramFiles';      Path="$ENVDIR/pf" },
+    @{ Name='ProgramFiles(x86)'; Var='ProgramFiles(x86)'; Path="$ENVDIR/pfx86" },
+    @{ Name='LOCALAPPDATA';      Var='LOCALAPPDATA';      Path="$ENVDIR/lad" },
+    @{ Name='scoop (USERPROFILE)'; Var='USERPROFILE';     Path="$ENVDIR/scoop" }
 )) {
     Reset-Env
     Set-Item "env:$($case.Var)" $case.Path
     $r = Invoke-Target @('version')
-    Check "7 Git Bash found via $($case.Name)" ($r.Output -match 'GITBASH_RAN') $r.Output
+    Check "11 Git Bash found via $($case.Name)" ($r.Output -match 'GITBASH_RAN') $r.Output
 }
 
 # ---------------------------------------------------------------------------
-# 8. No arguments must become `help`, not an empty command
+# 12. No arguments must become `help`, not an empty command.
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:ProgramFiles = "$ENVDIR/pf"
 $r = Invoke-Target @()
-Check "8 no args defaults to 'help'" ($r.Output -match "agent-tools 'help'") $r.Output
+Check "12 no args defaults to 'help'" ($r.Output -match "agent-tools 'help'") $r.Output
 
 # ---------------------------------------------------------------------------
-# 9. Argument marshalling: spaces, quotes, shell metacharacters, injection
+# 13. Argument marshalling: spaces, quotes, shell metacharacters, injection
+#     (exercised through the Git Bash path).
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:ProgramFiles = "$ENVDIR/pf"
 $r = Invoke-Target @('install','a b','it''s','$(whoami)','`bt`',"'; id #",'x;rm -rf /')
-Check "9a arg with a space survives quoted" ($r.Output -match "'a b'") $r.Output
-Check "9b embedded single quote is escaped" ($r.Output -match "'it'\\''s'") $r.Output
-Check "9c command substitution is NOT expanded" `
+Check "13a arg with a space survives quoted" ($r.Output -match "'a b'") $r.Output
+Check "13b embedded single quote is escaped" ($r.Output -match "'it'\\''s'") $r.Output
+Check "13c command substitution is NOT expanded" `
     (($r.Output -match '\$\(whoami\)') -and ($r.Output -notmatch [regex]::Escape((whoami)))) $r.Output
-Check "9d backticks are not executed" ($r.Output -match '`bt`') $r.Output
-Check "9e quote-break injection is neutralised" ($r.Output -match "''\\''; id #'") $r.Output
-Check "9f semicolon does not split the command" ($r.Output -match "'x;rm -rf /'") $r.Output
+Check "13d backticks are not executed" ($r.Output -match '`bt`') $r.Output
+Check "13e quote-break injection is neutralised" ($r.Output -match "''\\''; id #'") $r.Output
+Check "13f semicolon does not split the command" ($r.Output -match "'x;rm -rf /'") $r.Output
 
 # ---------------------------------------------------------------------------
-# 10. The UNC guard. Cannot set a \\wsl$ cwd on macOS, so the REGEX ITSELF is
-#     extracted from the shipped file and exercised -- the branch condition is
-#     verified, the branch body is not executed.
-# ---------------------------------------------------------------------------
-$src = Get-Content $SCRIPT -Raw
-$m = [regex]::Match($src, "if \(\`$cwd -match '([^']+)'\) \{")
-if (-not $m.Success) {
-    Check "10 UNC guard: pattern located in source" $false "could not find the -match line"
-} else {
-    $pat = $m.Groups[1].Value
-    Check "10a UNC guard: matches \\wsl`$\ path"        ('\\wsl$\Ubuntu\home\me' -match $pat) $pat
-    Check "10b UNC guard: matches \\wsl.localhost\ path" ('\\wsl.localhost\Ubuntu\home' -match $pat) $pat
-    Check "10c UNC guard: ignores a normal C: path"      (-not ('C:\Users\me\code' -match $pat)) $pat
-    Check "10d UNC guard: ignores another UNC share"     (-not ('\\server\share' -match $pat)) $pat
-}
-
-# ---------------------------------------------------------------------------
-# 11. Parse + static hygiene
-# ---------------------------------------------------------------------------
-$errs = $null; $toks = $null
-$null = [System.Management.Automation.Language.Parser]::ParseFile($SCRIPT, [ref]$toks, [ref]$errs)
-Check "11a parses with zero errors" ($errs.Count -eq 0) ($errs | ForEach-Object { $_.Message })
-Check "11b no stale agentmemory guidance in the wrapper" `
-    ($src -notmatch 'agentmemory (does not|needs WSL2|cannot install)') 'found stale text'
-Check "11c documents the pocock tool" ($src -match 'pocock') 'pocock not mentioned'
-
-# ---------------------------------------------------------------------------
-# 12. Git Bash branch must probe before running, exactly like the WSL branch.
-#     Without the probe an uninstalled tool surfaced as bash's raw
-#     "command not found" instead of the wrapper's own instructions.
+# 14. Git Bash probe fires before running, exactly like the WSL branch.
 # ---------------------------------------------------------------------------
 Reset-Env
 $env:ProgramFiles = "$ENVDIR/pf"
 $env:STUB_HAS_AT  = '0'
 $r = Invoke-Target @('doctor')
-Check "12a Git Bash without agent-tools: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
-Check "12b Git Bash without agent-tools: says it is missing in Git Bash" `
+Check "14a Git Bash without agent-tools: exits 1" ($r.Code -eq 1) "got exit $($r.Code)"
+Check "14b Git Bash without agent-tools: says it is missing in Git Bash" `
     ($r.Output -match 'not installed in Git Bash') $r.Output
-Check "12c Git Bash without agent-tools: does NOT run the command anyway" `
+Check "14c Git Bash without agent-tools: does NOT run the command anyway" `
     ($r.Output -notmatch 'GITBASH_RAN: export PATH.*agent-tools ') $r.Output
+
+# ---------------------------------------------------------------------------
+# 15. Static guards. Some branches (UNC translation, System32 exclusion, the
+#     Git-Bash cwd pin, the winget bootstrap) need a real C:\ path or a real
+#     Windows binary and cannot be executed on macOS/Linux. Verify the branch
+#     CONDITIONS and command strings straight from the shipped source instead.
+# ---------------------------------------------------------------------------
+$src = Get-Content $SCRIPT -Raw
+
+# 15a-d: UNC guard used before wslpath translation.
+$mUnc = [regex]::Match($src, "-match '(\^\\\\[^']*wsl[^']*)'")
+if (-not $mUnc.Success) {
+    Check "15a UNC guard: pattern located in source" $false "could not find the \\wsl -match line"
+} else {
+    $pat = $mUnc.Groups[1].Value
+    Check "15a UNC guard: matches \\wsl`$\ path"         ('\\wsl$\Ubuntu\home\me' -match $pat) $pat
+    Check "15b UNC guard: matches \\wsl.localhost\ path" ('\\wsl.localhost\Ubuntu\home' -match $pat) $pat
+    Check "15c UNC guard: ignores a normal C: path"      (-not ('C:\Users\me\code' -match $pat)) $pat
+    Check "15d UNC guard: ignores another UNC share"     (-not ('\\server\share' -match $pat)) $pat
+}
+
+# 15e: the WSL launcher at System32 must be excluded from Git Bash discovery.
+$mSys = [regex]::Match($src, "-notmatch '(\\\\System32\\\\)'")
+if (-not $mSys.Success) {
+    Check "15e System32 exclusion: guard present in source" $false 'no System32 -notmatch guard found'
+} else {
+    $sysPat = $mSys.Groups[1].Value
+    Check "15e System32 exclusion: matches the WSL launcher path" `
+        ('C:\Windows\System32\bash.exe' -match $sysPat) $sysPat
+    Check "15f System32 exclusion: leaves a real Git Bash path alone" `
+        (-not ('C:\Program Files\Git\bin\bash.exe' -match $sysPat)) $sysPat
+}
+
+# 15g: the Git-Bash cwd pin only fires for a drive-letter path.
+$mDrive = [regex]::Match($src, "-match '(\^\[A-Za-z\]:)'")
+if (-not $mDrive.Success) {
+    Check "15g cwd pin: drive-letter guard present" $false 'no ^[A-Za-z]: guard found'
+} else {
+    $drivePat = $mDrive.Groups[1].Value
+    Check "15g cwd pin: matches a Windows drive path" ('C:\Users\me\code' -match $drivePat) $drivePat
+    Check "15h cwd pin: ignores a POSIX path"         (-not ('/mnt/c/code' -match $drivePat)) $drivePat
+}
+
+# 15i: backslashes are converted to forward slashes for the bash `cd`.
+Check "15i cwd pin: converts backslashes for MSYS" `
+    ($src -match "-replace '\\\\', '/'") 'no backslash->slash conversion found'
+
+# 15j: winget bootstrap installs the right package id, guarded against a
+#      non-interactive hang on Read-Host.
+Check "15j bootstrap: winget targets Git.Git" ($src -match '--id Git\.Git') 'Git.Git id not found'
+Check "15k bootstrap: Read-Host guarded by an interactivity check" `
+    ($src -match 'IsInputRedirected') 'no interactivity guard around Read-Host'
+
+# ---------------------------------------------------------------------------
+# 16. Parse + static hygiene.
+# ---------------------------------------------------------------------------
+$errs = $null; $toks = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile($SCRIPT, [ref]$toks, [ref]$errs)
+Check "16a parses with zero errors" ($errs.Count -eq 0) ($errs | ForEach-Object { $_.Message })
+Check "16b no stale agentmemory guidance in the wrapper" `
+    ($src -notmatch 'agentmemory (does not|needs WSL2|cannot install)') 'found stale text'
+Check "16c documents the pocock tool" ($src -match 'pocock') 'pocock not mentioned'
+Check "16d documents why Git Bash is the default" `
+    ($src -match 'native Windows PATH') 'missing the native-PATH rationale'
 
 # ---------------------------------------------------------------------------
 Write-Host ($results -join "`n")
