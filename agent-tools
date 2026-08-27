@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.6.0
+VERSION=3.6.1
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -1586,7 +1586,7 @@ wire_crg() {
         c_ok "ignored .code-review-graph/"; }
     hdr "Building its graph (local parse, no LLM)"
     ( cd "$r" && code-review-graph build 2>&1 | tail -3 )
-    sync_instructions "$r"   # add its lines to the managed block (if one exists)
+    sync_instructions "$r" create   # add its lines; create the block if none yet
 }
 
 unwire_crg() {
@@ -1628,7 +1628,7 @@ wire_ts() {
     ts_installed || { c_bad "not installed — agent-tools install token-savior"; return 1; }
     have claude || { c_bad "claude CLI not found"; return 1; }
     if claude mcp list 2>/dev/null | grep -q "^token-savior"; then
-        c_ok "token-savior MCP already wired here"; sync_instructions "$r"; return 0
+        c_ok "token-savior MCP already wired here"; sync_instructions "$r" create; return 0
     fi
     # WORKSPACE_ROOTS pinned to this repo. Left unset it auto-discovers every
     # project under your home directory -- observed finding 10 on this machine,
@@ -1646,7 +1646,7 @@ wire_ts() {
     grep -q '^\.token-savior-cache\.json$' "$r/.gitignore" 2>/dev/null || {
         printf '\n# token-savior index cache (generated, rebuildable)\n.token-savior-cache.json\n' >> "$r/.gitignore"
         c_ok "ignored .token-savior-cache.json"; }
-    sync_instructions "$r"   # add its lines to the managed block (if one exists)
+    sync_instructions "$r" create   # add its lines; create the block if none yet
 }
 
 unwire_ts() {
