@@ -1187,6 +1187,10 @@ caveman_cmd() {
                 [ -n "$cnames" ] && ( cd "$neutral" && npx -y skills remove $cnames -g -y </dev/null >/dev/null 2>&1 )
                 rm -rf "$neutral" 2>/dev/null
             fi
+            # claude leaves the extracted plugin under plugins/cache after an
+            # uninstall; drop it so caveman_installed() stops reporting caveman
+            # as present.
+            rm -rf "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/caveman" 2>/dev/null
             c_ok "done — restart your agent for it to take effect" ;;
         *) c_bad "usage: agent-tools caveman [status|install|update|uninstall]"; return 2 ;;
     esac
