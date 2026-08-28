@@ -2891,7 +2891,8 @@ update_cmd() {
         case "$MEMORY_BACKEND" in
           claude-mem)
             if node_ok; then
-                npx -y claude-mem@latest install >/dev/null 2>&1 \
+                c_warn "updating claude-mem via npx (can take a minute — not stuck)..."
+                npx -y claude-mem@latest install --runtime worker </dev/null >/dev/null 2>&1 \
                     && c_ok "claude-mem updated" || c_bad "claude-mem update failed"
                 npx claude-mem start >/dev/null 2>&1 \
                     && c_ok "worker restarted" \
@@ -3226,7 +3227,7 @@ install_machine() {
         if cm_installed; then c_ok "claude-mem present"
         elif ! have npm; then c_warn "npm missing — cannot install claude-mem"
         elif confirm "claude-mem (memory that persists across sessions)"; then
-            npx -y claude-mem install >/dev/null 2>&1 \
+            npx -y claude-mem install --runtime worker </dev/null >/dev/null 2>&1 \
               && c_ok "claude-mem installed (it wires its own hooks + MCP)" \
               || c_bad "claude-mem install failed — try: npx claude-mem install"
         fi
@@ -4253,7 +4254,7 @@ memory_migrate_from_agentmemory() {
     if [ "$MEMORY_BACKEND" != claude-mem ]; then
         if cm_installed; then c_ok "claude-mem already installed"
         elif confirm "claude-mem (so something is still capturing)"; then
-            npx -y claude-mem install >/dev/null 2>&1 \
+            npx -y claude-mem install --runtime worker </dev/null >/dev/null 2>&1 \
               && c_ok "claude-mem installed (wires its own hooks + MCP)" \
               || c_bad "install failed — try: npx claude-mem install"
         fi
@@ -4295,7 +4296,7 @@ memory_switch() {
       claude-mem)
         if cm_installed; then c_ok "claude-mem already installed"
         elif confirm "claude-mem"; then
-            npx -y claude-mem install >/dev/null 2>&1 \
+            npx -y claude-mem install --runtime worker </dev/null >/dev/null 2>&1 \
               && c_ok "claude-mem installed (wires its own hooks + MCP)" \
               || c_bad "install failed — try: npx claude-mem install"
         fi ;;
