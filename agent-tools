@@ -1178,8 +1178,13 @@ caveman_cmd() {
         uninstall|remove)
             uninstall_plugin "$CAVEMAN_PLUGIN" "caveman plugin"
             if node_ok; then
-                local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
-                ( cd "$neutral" && npx -y skills remove caveman -g -y >/dev/null 2>&1 ) >/dev/null 2>&1
+                local neutral cnames
+                neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+                # Remove the ACTUAL installed skill names (caveman-*, cavecrew),
+                # not a bare "caveman" that matches nothing. Guard against an
+                # empty list, which would drop skills into an interactive menu.
+                cnames="$(caveman_skill_names | tr '\n' ' ')"
+                [ -n "$cnames" ] && ( cd "$neutral" && npx -y skills remove $cnames -g -y </dev/null >/dev/null 2>&1 )
                 rm -rf "$neutral" 2>/dev/null
             fi
             c_ok "done — restart your agent for it to take effect" ;;
@@ -1959,11 +1964,12 @@ pocock_cmd() {
         uninstall|remove)
             node_ok || { c_bad "needs Node >= $NODE_MIN"; return 1; }
             local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
-            local sk
-            printf '%s\n' "$POCOCK_SKILLS" | while IFS= read -r sk; do
-                [ -n "$sk" ] || continue
-                ( cd "$neutral" && npx -y skills remove "$sk" -g -y >/dev/null 2>&1 )
-            done
+            # One call with every name. A `printf | while read | npx` loop lets
+            # npx eat the remaining names off the pipe's stdin, so only the first
+            # skill gets removed and the rest are left behind. POCOCK_SKILLS is
+            # newline-separated; unquoted word-splitting turns it into args.
+            # shellcheck disable=SC2086
+            ( cd "$neutral" && npx -y skills remove $POCOCK_SKILLS -g -y </dev/null >/dev/null 2>&1 )
             rm -rf "$neutral" 2>/dev/null
             c_ok "pocock skills removed — restart your agent for it to take effect" ;;
         *) c_bad "usage: agent-tools pocock [status|install|update|uninstall]"; return 2 ;;
@@ -2078,7 +2084,9 @@ skills_stamp() {       # skills_stamp <dir> <newline-delimited expected names>
 # what is on disk rather than hardcoding a list that upstream can grow.
 caveman_skill_names() {
     local e
-    for e in "$HOME"/.agents/skills/caveman*; do
+    # The caveman repo installs cavecrew alongside the caveman-* skills, so a
+    # bare caveman* glob would leave cavecrew behind on uninstall.
+    for e in "$HOME"/.agents/skills/caveman* "$HOME"/.agents/skills/cavecrew; do
         [ -d "$e" ] && basename "$e"
     done
 }
@@ -2564,13 +2572,59 @@ uninstall_tool_cmd() {
 # Remove ONE feature, then deal with its data. Split out of the dispatcher so
 # `uninstall all` runs the identical path rather than a parallel copy that can
 # drift away from it.
+# context-mode writes a PreToolUse "cache-heal" hook into the USER settings.json
+# and a script under ~/.claude/hooks that `claude plugin uninstall` leaves in
+# place -- an orphaned hook that keeps running on every tool call. Strip both so
+# an uninstalled context-mode is actually gone. Matches the "context-mode"
+# substring across every hook event; the node path in the command varies by
+# machine, so an exact-command match would not do.
+cleanup_context_mode_hooks() {
+    local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    if [ -f "$cfg" ] && [ -n "${PY:-}" ]; then
+        "$PY" - "$cfg" <<'PY' 2>/dev/null && c_ok "removed context-mode hook from settings.json"
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(1)
+hooks = d.get("hooks")
+if not isinstance(hooks, dict):
+    sys.exit(1)
+def has_cm(entry):
+    for h in entry.get("hooks", []) or []:
+        if "context-mode" in (h.get("command", "") or ""):
+            return True
+    return False
+changed = False
+for ev in list(hooks.keys()):
+    lst = hooks.get(ev)
+    if not isinstance(lst, list):
+        continue
+    kept = [e for e in lst if not has_cm(e)]
+    if len(kept) != len(lst):
+        changed = True
+        if kept:
+            hooks[ev] = kept
+        else:
+            hooks.pop(ev, None)
+if not changed:
+    sys.exit(1)
+if not hooks:
+    d.pop("hooks", None)
+json.dump(d, open(p, "w"), indent=2)
+PY
+    fi
+    rm -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/context-mode-cache-heal.mjs" 2>/dev/null
+}
+
 uninstall_one() {
     local t="$1"
     hdr "uninstall $t"
     case "$t" in
         rtk)          uninstall_rtk ;;
         superpowers)  uninstall_plugin "$SUPERPOWERS_PLUGIN" superpowers ;;
-        context-mode) uninstall_plugin "$CONTEXT_MODE_PLUGIN" context-mode ;;
+        context-mode) uninstall_plugin "$CONTEXT_MODE_PLUGIN" context-mode; cleanup_context_mode_hooks ;;
         caveman)      caveman_cmd uninstall ;;
         pocock)       pocock_cmd uninstall ;;
         code-review-graph)
@@ -2595,7 +2649,11 @@ uninstall_one() {
         claude-mem)
                       # It installs and wires itself, so it uninstalls itself too.
                       if cm_installed; then
-                          npx -y claude-mem uninstall >/dev/null 2>&1 \
+                          # Stop the worker first (a running daemon made the
+                          # uninstall flake) and detach stdin so its interactive
+                          # prompt cannot stall on a redirected input.
+                          npx -y claude-mem stop >/dev/null 2>&1
+                          npx -y claude-mem uninstall </dev/null >/dev/null 2>&1 \
                               && c_ok "claude-mem uninstalled" \
                               || c_warn "claude-mem uninstall failed — try: npx claude-mem uninstall"
                           # Without a backend, record that fact rather than
