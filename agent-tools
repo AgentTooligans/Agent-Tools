@@ -33,7 +33,7 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.8.1
+VERSION=3.9.0
 VERSION_DATE=2026-08-27
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
@@ -229,9 +229,20 @@ am_legacy_installed() { have agentmemory || [ -d "$AM_LEGACY/data" ]; }
 # its hooks disabled and its service stopped costs nothing and is a useful
 # archive. Only two *capturing* backends duplicate work. Warning on mere
 # presence cries wolf at exactly the person who did the right thing.
-# claude-mem v13 serves its worker daemon on :37777; older installs used
-# :37701. Accept either so the health check is correct across versions.
-cm_active() { curl -sf -m 3 http://127.0.0.1:37777 >/dev/null 2>&1 || curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; }
+# Whether claude-mem's worker daemon is up. Do NOT hardcode the port: the
+# daemon writes ~/.claude-mem/worker.pid ({"pid":..,"port":..}) on start, so
+# read the port from there and this tracks whatever the installed version uses
+# (it moved 37701 -> 37777 once already). The literal ports are only a fallback
+# for older installs that predate the pid file.
+cm_active() {
+    local port p
+    port="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' \
+              "$HOME/.claude-mem/worker.pid" 2>/dev/null | head -1)"
+    for p in "$port" 37777 37701; do
+        [ -n "$p" ] && curl -sf -m 3 "http://127.0.0.1:$p" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
 am_legacy_active() {
     curl -sf -m 3 http://localhost:3111/agentmemory/health >/dev/null 2>&1 && return 0
     # Plugin enabled (not merely installed) also means hooks fire.
