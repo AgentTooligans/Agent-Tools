@@ -20,9 +20,9 @@
 
   Since agent-tools 3.3.0 the agentmemory backend (the one with no
   native-Windows installer) is gone; claude-mem, graphify, code-review-graph,
-  token-savior, superpowers, context-mode and the skill packs (caveman,
-  pocock) all work under Git Bash. The one remaining gap is rtk, which needs
-  either Rust (`cargo install --git`) or the release zip on PATH.
+  token-savior, superpowers, context-mode, rtk and the skill packs (caveman,
+  pocock) all work under Git Bash. rtk installs from its native release
+  binary, so no Rust is required.
 
 .EXAMPLE
   agent-tools doctor

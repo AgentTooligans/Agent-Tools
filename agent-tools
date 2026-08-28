@@ -18,7 +18,7 @@
 #   macOS          full
 #   Linux          full
 #   WSL2           full
-#   Windows native PARTIAL      no rtk binary by default — see `agent-tools help`
+#   Windows native full         rtk installs from its release binary
 #
 #   Since 3.3.0 there is no supervised memory server: claude-mem runs its own
 #   worker and needs no launchd/systemd unit from us. That removed the last
@@ -96,7 +96,7 @@ NO_INSTALL=0
 # ---------------------------------------------------------------------------
 # Memory backend. One tool does this job now.
 #
-#   claude-mem   default. Runs a worker on :37701 (start with `npx claude-mem
+#   claude-mem   default. Runs a worker on :37777 (start with `npx claude-mem
 #                start` — no launchd/systemd unit needed, and no cwd trap),
 #                injects context at session start. No bulk importer: it starts
 #                from install day. Ships /learn-codebase to ingest a repo.
@@ -229,7 +229,9 @@ am_legacy_installed() { have agentmemory || [ -d "$AM_LEGACY/data" ]; }
 # its hooks disabled and its service stopped costs nothing and is a useful
 # archive. Only two *capturing* backends duplicate work. Warning on mere
 # presence cries wolf at exactly the person who did the right thing.
-cm_active() { curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; }
+# claude-mem v13 serves its worker daemon on :37777; older installs used
+# :37701. Accept either so the health check is correct across versions.
+cm_active() { curl -sf -m 3 http://127.0.0.1:37777 >/dev/null 2>&1 || curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; }
 am_legacy_active() {
     curl -sf -m 3 http://localhost:3111/agentmemory/health >/dev/null 2>&1 && return 0
     # Plugin enabled (not merely installed) also means hooks fire.
@@ -531,7 +533,7 @@ Env (refresh semantic pass):
                   sessions conflict), so it is ignored there.
 
 Memory backend (install-machine):
-  --memory=claude-mem   default. light worker on :37701, context injection
+  --memory=claude-mem   default. light worker on :37777, context injection
   --memory=none         graphify only, nothing captures sessions
   Your choice is remembered in ~/.config/agent-tools/config.
   (--memory=agentmemory was removed in 3.3.0. A config that still names it
@@ -548,7 +550,7 @@ Flags (install-machine):
   default         ask before each install; skips (never hangs) when
                   non-interactive
 
-Platforms: macOS · Linux · WSL2 = full.  Native Windows = no rtk (see help).
+Platforms: macOS · Linux · WSL2 · native Windows = full.
 
 New machine:   agent-tools install-machine
 New project:   cd ~/code/myrepo && agent-tools init
@@ -565,10 +567,10 @@ PLATFORMS
            is no longer needed for memory.
   WSL2     full, with or without systemd. Before 3.3.0 a systemd-less WSL had
            no way to supervise the memory server; that server is gone.
-  Windows  graphify, claude-mem, superpowers, context-mode and the skill packs
-           all work. rtk is the gap: no scoop/winget package, so you need Rust
-           (`cargo install --git`) or the release zip on PATH. WSL2 remains the
-           smoother route, but is no longer required.
+  Windows  full. graphify, claude-mem, superpowers, context-mode, the skill
+           packs and rtk all work under Git Bash. rtk installs from its native
+           release binary into ~/.local/bin (no Rust needed). WSL2 remains an
+           option, but is no longer required.
 
            HISTORICAL: releases before 3.3.0 said "Windows = graphify only".
            That was an agentmemory limitation (no engine installer, and
@@ -828,7 +830,7 @@ install_uv() {
 # empty store. Two LAWs were encoded in those unit files to survive it.
 #
 # claude-mem has neither problem: `npx claude-mem start` owns its own worker on
-# :37701 and its store path is absolute. So the plist, the unit, the linger
+# :37777 and its store path is absolute. So the plist, the unit, the linger
 # call, the cwd pinning and the --tools core argument are all gone. If you are
 # looking for why a memory server is not running, the answer is now one command
 # (`npx claude-mem start`), not a supervisor.
@@ -869,7 +871,7 @@ doctor() {
         macos) c_ok "macOS — full support" ;;
         linux) c_ok "Linux — full support" ;;
         wsl)   c_ok "WSL2 — full support" ;;
-        windows) c_warn "native Windows — everything but rtk works; rtk needs Rust or the release zip" ;;
+        windows) c_ok "native Windows — full support (rtk installs from its release binary)" ;;
         *) c_warn "unrecognized platform: $(uname -s)" ;;
     esac
 
@@ -930,8 +932,8 @@ doctor() {
         # Correction (2026-07-29): the installer says "Worker autostart skipped
         # — start it manually with npx claude-mem start", so a worker IS wanted.
         # It needs no supervisor, but it does need to be running.
-        if curl -sf -m 3 http://127.0.0.1:37701 >/dev/null 2>&1; then
-            c_ok "worker responding on :37701"
+        if cm_active; then
+            c_ok "worker responding (claude-mem daemon)"
         else
             c_warn "worker not responding — start it:  npx claude-mem start"
         fi ;;
@@ -1080,6 +1082,7 @@ doctor() {
 #   Hence: always from a neutral directory, and global scope explicitly.
 # ---------------------------------------------------------------------------
 CAVEMAN_REPO="JuliusBrussee/caveman"
+CAVEMAN_PLUGIN="caveman@caveman"
 
 caveman_level() {          # active level, or empty when off
     local f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-active"
@@ -1103,16 +1106,22 @@ install_caveman() {
     fi
     caveman_installed || confirm "caveman (fewer output tokens; instructions only, no service)" || return 0
 
-    # Run from a directory we do not care about: the upstream installer writes
-    # $PWD/.agents/skills for non-Claude agents.
-    local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
-    ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --non-interactive >/dev/null 2>&1 ) \
-        && c_ok "caveman installed for Claude Code (plugin + session hooks)" \
-        || c_warn "caveman plugin install failed (network? Node?)"
+    # The Claude Code plugin (the /caveman mode + its session hooks) is a
+    # marketplace plugin, installed exactly like superpowers/context-mode. The
+    # old `npx github:$CAVEMAN_REPO --non-interactive` entry point was removed
+    # upstream (caveman's CLI was rewritten), so that path now no-ops with an
+    # "unknown command" on every OS.
+    if plugin_installed "$CAVEMAN_PLUGIN"; then
+        c_ok "caveman plugin already installed"; plugin_scope_note "$CAVEMAN_PLUGIN"
+    else
+        plugin_add "$CAVEMAN_REPO" "$CAVEMAN_PLUGIN" "caveman (plugin + /caveman mode)"
+    fi
 
-    # Global, cross-agent. Eve and PromptScript reject global scope by design;
-    # that is their limitation and not an error worth surfacing.
-    # skills_copy_flag prints an empty string or --copy; splitting is the point.
+    # Cross-agent skills for non-Claude agents. Run from a throwaway dir: the
+    # skills installer writes $PWD/.agents/skills. skills_copy_flag prints '' or
+    # --copy (Windows needs real files, not symlinks). Eve and PromptScript
+    # reject global scope by design; not an error worth surfacing.
+    local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
     # shellcheck disable=SC2046
     ( cd "$neutral" && npx -y skills add "$CAVEMAN_REPO" --skill '*' --agent '*' -g -y $(skills_copy_flag) >/dev/null 2>&1 ) \
         && c_ok "caveman skills installed globally (~/.agents/skills, all agents)" \
@@ -1148,20 +1157,20 @@ caveman_cmd() {
                 c_warn "not installed — agent-tools caveman install"
             fi ;;
         update|upgrade)
-            node_ok || { c_bad "needs Node >= 18"; return 1; }
-            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
-            ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --non-interactive --force >/dev/null 2>&1 ) \
-                && c_ok "caveman plugin updated" || c_warn "plugin update failed"
-            ( cd "$neutral" && npx -y skills update caveman -g -y >/dev/null 2>&1 ) \
-                && c_ok "global caveman skills updated" || c_warn "skill update failed"
-            rm -rf "$neutral" 2>/dev/null ;;
+            update_plugin "$CAVEMAN_PLUGIN" "caveman plugin"
+            if node_ok; then
+                local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+                ( cd "$neutral" && npx -y skills update caveman -g -y >/dev/null 2>&1 ) \
+                    && c_ok "global caveman skills updated" || c_warn "skill update failed"
+                rm -rf "$neutral" 2>/dev/null
+            else c_warn "skills update needs Node >= 18 (plugin handled regardless)"; fi ;;
         uninstall|remove)
-            node_ok || { c_bad "needs Node >= 18"; return 1; }
-            local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
-            ( cd "$neutral" && npx -y "github:$CAVEMAN_REPO" --uninstall >/dev/null 2>&1 ) \
-                && c_ok "caveman removed from Claude Code" || c_warn "uninstall reported a problem"
-            ( cd "$neutral" && npx -y skills remove caveman -g -y >/dev/null 2>&1 ) >/dev/null 2>&1
-            rm -rf "$neutral" 2>/dev/null
+            uninstall_plugin "$CAVEMAN_PLUGIN" "caveman plugin"
+            if node_ok; then
+                local neutral; neutral="$(mktemp -d 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}")"
+                ( cd "$neutral" && npx -y skills remove caveman -g -y >/dev/null 2>&1 ) >/dev/null 2>&1
+                rm -rf "$neutral" 2>/dev/null
+            fi
             c_ok "done — restart your agent for it to take effect" ;;
         *) c_bad "usage: agent-tools caveman [status|install|update|uninstall]"; return 2 ;;
     esac
@@ -1208,6 +1217,20 @@ caveman_cmd() {
 #     MCP        already `-s local` in both cases
 # ===========================================================================
 RTK_REPO="rtk-ai/rtk"
+
+# Fetch the native rtk.exe from the latest release into $BIN (on the native
+# Windows PATH). The asset is a flat zip with rtk.exe at the root. Returns 0
+# only if rtk ends up installed. Windows-only; needs curl + a PowerShell.
+rtk_win_fetch() {
+    local ps rz="$BIN/rtk.zip"
+    ps="$(win_powershell)"; [ -n "$ps" ] || return 1
+    have curl || return 1
+    mkdir -p "$BIN"
+    curl -fsSL -o "$rz" "https://github.com/$RTK_REPO/releases/latest/download/rtk-x86_64-pc-windows-msvc.zip" || return 1
+    "$ps" -NoProfile -Command "Expand-Archive -Force -LiteralPath '$(win_path "$rz")' -DestinationPath '$(win_path "$BIN")'" >/dev/null 2>&1
+    rm -f "$rz"; export PATH="$BIN:$PATH"; hash -r 2>/dev/null || true
+    rtk_installed
+}
 # rtk uses the OS config directory, not XDG everywhere, so this differs per
 # platform. It holds filters.toml AND history.db -- the savings record behind
 # `rtk gain`, which is the one thing here that cannot be regenerated. Kept
@@ -1432,16 +1455,17 @@ install_rtk() {
                         || c_warn "install.sh failed"
                 else c_warn "curl missing — cannot fetch the installer"; fi ;;
             windows)
-                # No install.sh path on native Windows. cargo builds from the
-                # right repo, which also sidesteps the crates.io name clash.
-                if have cargo; then
+                # Native rtk.exe from the latest release -> $BIN (native PATH),
+                # no Rust needed. Fall back to cargo, then manual instructions.
+                rtk_win_fetch && c_ok "rtk installed (release binary -> $BIN)"
+                if ! rtk_installed && have cargo; then
                     cargo install --git "https://github.com/$RTK_REPO" >/dev/null 2>&1 \
-                        && c_ok "rtk installed (cargo, from $RTK_REPO)" \
-                        || c_bad "cargo install failed"
-                else
-                    c_warn "native Windows: download rtk-x86_64-pc-windows-msvc.zip from"
-                    c_warn "    https://github.com/$RTK_REPO/releases  and put rtk.exe on PATH"
-                    c_warn "    (or install Rust and re-run — cargo builds it from source)"
+                        && c_ok "rtk installed (cargo, from $RTK_REPO)"
+                fi
+                if ! rtk_installed; then
+                    c_warn "could not fetch rtk automatically -- download"
+                    c_warn "    rtk-x86_64-pc-windows-msvc.zip from https://github.com/$RTK_REPO/releases"
+                    c_warn "    and put rtk.exe on PATH (or install Rust; cargo builds it)"
                     return 0
                 fi ;;
         esac
@@ -1503,6 +1527,7 @@ update_rtk() {
     rtk_installed || { c_warn "rtk not installed — agent-tools install rtk"; return 0; }
     case "$PLATFORM" in
         macos) have brew && { brew upgrade rtk >/dev/null 2>&1; c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}')"; return 0; } ;;
+        windows) rtk_win_fetch && c_ok "rtk $(rtk --version 2>/dev/null | awk '{print $2}')" || c_warn "rtk update failed"; return 0 ;;
     esac
     if have curl && [ "$PLATFORM" != windows ]; then
         curl -fsSL "$RTK_INSTALL_SH" | sh >/dev/null 2>&1 \
@@ -1523,7 +1548,7 @@ uninstall_rtk() {
     case "$PLATFORM" in
         macos) have brew && brew uninstall rtk >/dev/null 2>&1 && c_ok "rtk removed (brew)" ;;
         *) have cargo && cargo uninstall rtk >/dev/null 2>&1 && c_ok "rtk removed (cargo)" \
-             || { rm -f "$BIN/rtk" 2>/dev/null && c_ok "removed $BIN/rtk"; } ;;
+             || { rm -f "$BIN/rtk" "$BIN/rtk.exe" 2>/dev/null && c_ok "removed rtk from $BIN"; } ;;
     esac
     c_warn "config kept: $(rtk_config_dir) (history.db is your savings record)"
 }
@@ -3063,7 +3088,7 @@ migrate_cmd() {
 
 install_machine() {
     hdr "Platform: $PLATFORM"
-    [ "$PLATFORM" = windows ] && c_warn "native Windows: everything but rtk installs here (rtk needs Rust or the release zip)."
+    [ "$PLATFORM" = windows ] && c_ok "native Windows: full support — rtk installs from its release binary."
     if [ "$PLATFORM" = macos ] && ! have brew; then c_bad "install Homebrew first: https://brew.sh"; exit 1; fi
 
     hdr "1. Prerequisites"
