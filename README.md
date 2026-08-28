@@ -570,18 +570,17 @@ Two sharp edges, both handled:
 | macOS | full | ✅ |
 | Linux | full | ✅ Ubuntu 24.04 |
 | WSL2 | full | ✅ Win 11 + Ubuntu 26.04 & 24.04 |
-| Windows native | everything **except rtk**, which needs cargo or a release zip | ✅ Win 11 + Git Bash |
+| Windows native | full — rtk installs from its native release binary | ✅ Win 11 + Git Bash |
 
-**Windows got better in 3.3.0.** Earlier versions said "graphify only" because
+**Windows is fully supported.** Earlier versions said "graphify only" because
 the agentmemory backend shipped no Windows engine installer. That backend is
 gone, so claude-mem, the skill packs and the rest all work under Git Bash.
-rtk is the only remaining gap: its `install.sh` doesn't cover native Windows,
-so `agent-tools` builds it with `cargo install --git` when Rust is present — a
-route that also sidesteps the crates.io name collision — and otherwise points
-you at the release zip. Everything else (graphify, code-review-graph,
-token-savior via uv; superpowers and context-mode via the Claude plugin system)
-is platform-agnostic. Details and the WSL interop trap:
-[docs/PLATFORMS.md](docs/PLATFORMS.md).
+rtk closed the last gap in 3.9.0: on Windows `agent-tools` downloads its native
+release binary (`rtk-x86_64-pc-windows-msvc.zip`) into `~/.local/bin` — no Rust
+needed — and falls back to `cargo install --git` only if that download is
+unavailable. Everything else (graphify, code-review-graph, token-savior via uv;
+superpowers and context-mode via the Claude plugin system) is platform-agnostic.
+Details and the WSL interop trap: [docs/PLATFORMS.md](docs/PLATFORMS.md).
 
 ---
 

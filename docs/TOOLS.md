@@ -480,11 +480,12 @@ agent-tools tools                         # confirm
 | caveman | ✅ | ✅ | ✅ | ✅ |
 | pocock | ✅ | ✅ | ✅ | ✅ |
 
-rtk is now the only tool with a platform gap (agentmemory, the other one, was
-removed in 3.3.0): upstream's `install.sh` does not
-cover native Windows. `agent-tools` uses `cargo install --git` there when Rust
-is present — which also sidesteps the crates.io name collision — and otherwise
-points you at the release zip. Everything else installs through uv, npm or the
-Claude plugin system, all of which are platform-agnostic.
+Every tool now installs on all four platforms (agentmemory, the one that used to
+gap, was removed in 3.3.0). rtk was the last holdout: upstream's `install.sh`
+does not cover native Windows, so there `agent-tools` downloads rtk's native
+release binary automatically — which also names the repo rather than the
+crates.io package, sidestepping the name collision — and falls back to `cargo
+install --git` only when that download is unavailable. Everything else installs
+through uv, npm or the Claude plugin system, all of which are platform-agnostic.
 
 More: [PLATFORMS.md](PLATFORMS.md).

@@ -83,9 +83,10 @@ Supported. Before 3.3.0 this page said "not supported", because the agentmemory
 backend had no Windows engine installer. That backend is gone, and claude-mem
 is plain Node — it runs under Git Bash or WSL alike.
 
-The only remaining Windows gap is **rtk**, which ships no scoop/winget package.
-Install Rust and `cargo install --git https://github.com/rtk-ai/rtk`, or put the
-release zip's binary on PATH. See [PLATFORMS.md](PLATFORMS.md).
+**rtk** used to be the one Windows gap; as of 3.9.0 `agent-tools install rtk`
+downloads its native release binary (`rtk-x86_64-pc-windows-msvc.zip`) onto your
+PATH automatically, falling back to `cargo install --git` only if that download
+is unavailable. See [PLATFORMS.md](PLATFORMS.md).
 
 ---
 

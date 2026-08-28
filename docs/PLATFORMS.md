@@ -12,7 +12,7 @@ Windows symlinks and WSL filesystem boundaries being the two that bite hardest.
 | macOS | full | **none needed** | ✅ macOS 15 (Apple Silicon) |
 | Linux | full | **none needed** | ✅ Ubuntu 24.04 container |
 | WSL2 | full | **none needed** | ✅ Windows 11 + Ubuntu 26.04 |
-| Windows native | everything except **rtk**, which needs cargo or a zip | none | ✅ Win 11 + Git Bash |
+| Windows native | full — rtk installs from its native release binary | none | ✅ Win 11 + Git Bash |
 
 "Verified" means the tool was actually run there, not that it should work.
 
@@ -36,10 +36,11 @@ gap — see [Windows native](#windows-native) below. Details: [SERVICES.md](SERV
 | token-savior | ✅ | ✅ | ✅ | ✅ | uv |
 
 Everything installed through **uv**, **npm/npx** or the **Claude plugin
-system** is platform-agnostic by construction. Since 3.3.0 there is exactly one
-gap left: rtk (below). The other one, agentmemory, was removed — it shipped no
-native-Windows engine installer, and that single fact is what kept this table
-saying "Windows: graphify only" for three minor versions.
+system** is platform-agnostic by construction. As of 3.9.0 there is no
+Windows gap left: rtk installs from its native release binary too (below). The
+one that used to bite, agentmemory, was removed — it shipped no native-Windows
+engine installer, and that single fact is what kept this table saying
+"Windows: graphify only" for three minor versions.
 
 ### The skill packs on native Windows
 
@@ -56,13 +57,15 @@ and WSL the symlinks make that unnecessary.
 
 ### rtk on native Windows
 
-Upstream's `install.sh` is POSIX-only, so `agent-tools install rtk` there:
+Upstream's `install.sh` is POSIX-only, so on Windows `agent-tools install rtk`
+downloads the native release binary directly:
 
-1. uses `cargo install --git https://github.com/rtk-ai/rtk` when Rust is
-   present — which also sidesteps the crates.io name collision, since it names
-   the repo rather than the package;
-2. otherwise prints the release-zip instructions and stops, rather than
-   installing something that might be the wrong `rtk`.
+1. fetches `rtk-x86_64-pc-windows-msvc.zip` from the latest `rtk-ai/rtk`
+   release and extracts `rtk.exe` into `~/.local/bin` (on the native Windows
+   PATH) — no Rust required, and naming the repo rather than the crates.io
+   package sidesteps the name collision;
+2. falls back to `cargo install --git https://github.com/rtk-ai/rtk` if the
+   download is unavailable and Rust is present.
 
 The hook it needs is a `settings.json` entry, not a native component, so it
 works identically once the binary exists. For full filter support on Windows,

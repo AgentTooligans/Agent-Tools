@@ -403,8 +403,10 @@ crates.io ships an unrelated **Rust Type Kit** under the same binary name.
 `rtk --version` prints a version for either one, so it is not a test. `rtk gain`
 exists only on `rtk-ai/rtk`, which is what `doctor` checks. Homebrew core's
 `rtk` formula is the right project (homepage `rtk-ai.app`). On native Windows,
-where upstream's `install.sh` does not run, `cargo install --git` names the
-repository and therefore cannot resolve to the wrong package.
+where upstream's `install.sh` does not run, `agent-tools` downloads the release
+binary straight from the `rtk-ai/rtk` repo (and the `cargo install --git`
+fallback likewise names the repository), so neither route can resolve to the
+wrong package.
 
 Related, smaller, same shape as graphify's `[gemini,mcp]`: **token-savior's
 extras are not remembered across an upgrade.** Without `[memory-vector]` it
