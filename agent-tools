@@ -883,8 +883,18 @@ doctor() {
     else c_bad "no working python — 'uv python install' fixes it (Windows: python3 is often a Store stub)"; fi
     if have graphify; then
         c_ok "graphify $(graphify --version 2>/dev/null | awk '{print $2}')"
-        local gpy="$HOME/.local/share/uv/tools/graphifyy/bin/python"
-        [ -x "$gpy" ] || gpy="$(command -v python3)"
+        # Check graphify's OWN venv python — its mcp deps live there, not in the
+        # system python. uv's tool layout differs by OS: <dir>/graphifyy/bin/python
+        # on Unix, <dir>\graphifyy\Scripts\python.exe on Windows. Ask uv where its
+        # tools are (Windows form -> POSIX via cygpath) and try both layouts.
+        local gbase gpy=""
+        gbase="$(uv tool dir 2>/dev/null)"
+        [ -n "$gbase" ] && have cygpath && gbase="$(cygpath -u "$gbase" 2>/dev/null || printf '%s' "$gbase")"
+        for _c in "$gbase/graphifyy/bin/python" "$gbase/graphifyy/Scripts/python.exe" \
+                  "$HOME/.local/share/uv/tools/graphifyy/bin/python"; do
+            [ -x "$_c" ] && { gpy="$_c"; break; }
+        done
+        [ -n "$gpy" ] || gpy="$(command -v python3)"
         if "$gpy" -c "import mcp.types as t; raise SystemExit(0 if hasattr(t,'AnyUrl') else 1)" 2>/dev/null; then
             c_ok "graphify MCP deps OK (mcp<2 pinned)"
         else
