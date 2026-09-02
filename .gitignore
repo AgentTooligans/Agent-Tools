@@ -7,17 +7,10 @@
 .claude
 .gitignore
 
-# Graphify knowledge graph. Derived output is ignored; the LLM-derived cache and
-# labels ARE committed — that is the expensive part (hours of extraction in a
-# couple of MB), and it lets a fresh clone rebuild the graph at zero LLM cost.
-# SYNTAX: never use `graphify-out/` or `graphify-out/**` — git will not descend
-# into an excluded directory, which silently kills every negation below.
-graphify-out/*
-!graphify-out/cache/
-graphify-out/cache/*
-!graphify-out/cache/semantic-deep/
-!graphify-out/.graphify_labels.json
-!graphify-out/.graphify_labels.json.sig
+# Graphify knowledge graph. Fully derived output — not committed. A fresh
+# clone regenerates it (including LLM-derived labels/cache) by running
+# graphify/agent-tools refresh.
+graphify-out/
 
 # code-review-graph index (generated, rebuildable)
 .code-review-graph/
