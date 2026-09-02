@@ -31,6 +31,15 @@ chosen in this order:
 If none of those exist, `agent-tools refresh` refuses to start and points you
 at `--code-only`, which needs nothing.
 
+Any of these env vars set inline (e.g. `GRAPHIFY_CLAUDE_CLI_MODEL=haiku
+agent-tools refresh`) apply to that one run only — the next bare `agent-tools
+refresh` reverts to the default. To make a choice stick, export it in your
+shell rc file:
+
+```bash
+echo 'export GRAPHIFY_CLAUDE_CLI_MODEL=haiku' >> ~/.zshrc   # or ~/.bashrc
+```
+
 **Parallelism.** On an API backend the semantic pass runs 4 chunks at once by
 default; raise it with `AGENT_TOOLS_CONCURRENCY=8`. On `claude-cli` graphify
 **forces serial execution** (one chunk at a time) — parallel `claude -p`

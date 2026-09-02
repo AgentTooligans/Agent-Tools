@@ -124,6 +124,13 @@ GRAPHIFY_CLAUDE_CLI_MODEL=haiku agent-tools refresh     # override the Sonnet de
 AGENT_TOOLS_BACKEND=gemini AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh   # 8 chunks at once
 ```
 
+These only apply to the one command they're prefixed to. To make a choice the
+default for every future run, export it in your shell rc file instead:
+
+```bash
+echo 'export GRAPHIFY_CLAUDE_CLI_MODEL=haiku' >> ~/.zshrc   # or ~/.bashrc
+```
+
 > **Concurrency only helps on an API backend.** graphify **forces the
 > `claude-cli` backend to run one chunk at a time** — parallel `claude -p`
 > subprocesses conflict over Claude Code session state — so

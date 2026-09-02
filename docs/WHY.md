@@ -103,8 +103,10 @@ dispatches one file, not the whole corpus.
 ### Backends
 
 - `claude-cli` — uses the **Claude Code subscription**, no API key. Concurrency is
-  **forced to 1**, so it is slow but free. Defaults to whatever model the CLI
-  defaults to; override with `GRAPHIFY_CLAUDE_CLI_MODEL`.
+  **forced to 1**, so it is slow but free. agent-tools defaults it to **Sonnet**
+  (graphify's own default is Opus); override per-run with
+  `GRAPHIFY_CLAUDE_CLI_MODEL=haiku`, or export it in your shell rc to change
+  the default for good — see [USAGE.md](USAGE.md#which-model-builds-the-graph).
 - `gemini` — needs `GEMINI_API_KEY` (an AI Studio key; a Gemini *subscription*
   does not provide one). Runs 4-way parallel. Requires the `[gemini]` extra or it
   fails with *"the 'openai' package is required for this backend"*.
