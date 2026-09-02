@@ -19,9 +19,9 @@ chosen in this order:
    explicit choice always wins.
 2. **`claude-cli`**, if the `claude` CLI is installed — no API key, billed to
    an existing subscription, so it's free at the margin for people who have it.
-   It runs the **Haiku** model by default (graphify's own default is Opus,
+   It runs the **Sonnet** model by default (graphify's own default is Opus,
    overkill for structured extraction). Override with
-   `GRAPHIFY_CLAUDE_CLI_MODEL=sonnet` (or `opus`, or a full model id).
+   `GRAPHIFY_CLAUDE_CLI_MODEL=haiku` (or `opus`, or a full model id).
 3. **Whatever API key you have.** graphify auto-detects from `GEMINI_API_KEY`,
    `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` and friends.
    No `claude` CLI needed — a Codex-only user with `OPENAI_API_KEY` lands here

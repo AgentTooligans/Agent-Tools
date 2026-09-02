@@ -120,7 +120,7 @@ Tune the model, force a backend, or parallelize harder:
 
 ```bash
 AGENT_TOOLS_BACKEND=gemini agent-tools refresh          # force a specific backend
-GRAPHIFY_CLAUDE_CLI_MODEL=sonnet agent-tools refresh    # override the Haiku default (haiku|sonnet|opus|full model id)
+GRAPHIFY_CLAUDE_CLI_MODEL=haiku agent-tools refresh     # override the Sonnet default (haiku|sonnet|opus|full model id)
 AGENT_TOOLS_BACKEND=gemini AGENT_TOOLS_CONCURRENCY=8 agent-tools refresh   # 8 chunks at once
 ```
 

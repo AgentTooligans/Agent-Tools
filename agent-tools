@@ -3762,15 +3762,15 @@ graphify_backend_args() {
 
 # graphify's claude-cli backend defaults to Opus, which graphify's own source
 # calls "overkill" for the structured-JSON extraction it performs. Opus is also
-# the slow, rate-limit-hungry option. Default it to Haiku — far faster and
-# cheaper for this shape of work — but ONLY when claude-cli is the effective
-# backend AND the user has not already pinned a model. An explicit
-# GRAPHIFY_CLAUDE_CLI_MODEL always wins; override per-run with e.g.
-# GRAPHIFY_CLAUDE_CLI_MODEL=sonnet agent-tools refresh.
+# the slow, rate-limit-hungry option. Default it to Sonnet — better quality
+# than Haiku for this shape of work while still cheaper/faster than Opus — but
+# ONLY when claude-cli is the effective backend AND the user has not already
+# pinned a model. An explicit GRAPHIFY_CLAUDE_CLI_MODEL always wins; override
+# per-run with e.g. GRAPHIFY_CLAUDE_CLI_MODEL=haiku agent-tools refresh.
 default_claude_cli_model() {
     local choice="${AGENT_TOOLS_BACKEND:-${GRAPHIFY_BACKEND:-}}"
     if { [ -z "$choice" ] && have claude; } || [ "$choice" = claude-cli ]; then
-        [ -z "${GRAPHIFY_CLAUDE_CLI_MODEL:-}" ] && export GRAPHIFY_CLAUDE_CLI_MODEL=haiku
+        [ -z "${GRAPHIFY_CLAUDE_CLI_MODEL:-}" ] && export GRAPHIFY_CLAUDE_CLI_MODEL=sonnet
     fi
 }
 
