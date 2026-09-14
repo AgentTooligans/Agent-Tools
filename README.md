@@ -470,6 +470,8 @@ agent-tools update tools       # only the optional tools — skips graphify, mem
 
 ```bash
 agent-tools update memory      # claude-mem, and restart its worker
+agent-tools restart memory     # visibly stop, start, and health-check it
+agent-tools restart all        # every managed service (currently claude-mem)
 agent-tools update pocock      # the mattpocock skills
 agent-tools update caveman     # the caveman plugin + its global skills
 agent-tools update graphify    # graphify only

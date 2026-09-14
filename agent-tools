@@ -12,6 +12,7 @@
 #   agent-tools tools             every optional tool: installed? wired? where?
 #   agent-tools install NAME      add one tool (--project = this repo only)
 #   agent-tools update NAME|all   upgrade one tool, or everything installed
+#   agent-tools restart NAME|all  restart a managed background worker
 #   agent-tools help              long help, with the reasoning
 #
 # PLATFORM SUPPORT
@@ -33,8 +34,8 @@ set -uo pipefail
 # release time. They must not be derived from git: the file that actually runs
 # on a user's machine is the copy install.sh drops in ~/.local/bin, which has
 # no repository around it and cannot ask git anything.
-VERSION=3.9.0
-VERSION_DATE=2026-08-27
+VERSION=3.9.1
+VERSION_DATE=2026-09-14
 
 # Where this thing lives. `update self` uses it to pull, or to clone a fresh
 # copy on a machine that installed from a downloaded archive and therefore has
@@ -436,6 +437,7 @@ agent-tools — graphify + claude-mem, set up correctly, on any project.
   agent-tools caveman [CMD]     output-token compression: status|install|update|uninstall
   agent-tools pocock [CMD]      grill-me/handoff/wait-what: status|install|update|uninstall
   agent-tools update [WHAT]     update one thing, or everything installed
+  agent-tools restart [WHAT]    restart claude-mem or every managed service
   agent-tools migrate export    archive what git cannot carry (memory, keys, ~/.claude)
   agent-tools migrate import F  restore that archive on a new computer
   agent-tools help              the reasoning behind every default
@@ -483,6 +485,8 @@ Updating (see docs/UPDATING.md):
   agent-tools update all        graphify + claude-mem + every installed tool + self
   agent-tools update tools      only the optional tools (skips graphify/memory/self)
   agent-tools update memory     just claude-mem, and restart its worker
+  agent-tools restart memory    stop, start, and health-check claude-mem
+  agent-tools restart all       restart every managed service (currently claude-mem)
   agent-tools update pocock     just the mattpocock skills
   agent-tools update graphify   just that one (same for rtk, caveman, pocock,
                                 superpowers, context-mode, code-review-graph,
@@ -944,9 +948,9 @@ doctor() {
         # — start it manually with npx claude-mem start", so a worker IS wanted.
         # It needs no supervisor, but it does need to be running.
         if cm_active; then
-            c_ok "worker responding (claude-mem daemon)"
+            c_ok "worker responding (claude-mem daemon) — restart: agent-tools restart memory"
         else
-            c_warn "worker not responding — start it:  npx claude-mem start"
+            c_warn "worker not responding — restart it: agent-tools restart memory"
         fi ;;
       none) c_warn "no memory backend selected (--memory=none)" ;;
     esac
@@ -1648,9 +1652,12 @@ update_plugin() {      # update_plugin <name@marketplace> <label>
     have claude || { c_warn "claude CLI not found"; return 0; }
     plugin_installed "$1" || { c_warn "$2 not installed"; return 0; }
     claude plugin marketplace update >/dev/null 2>&1
-    claude plugin update "$1" >/dev/null 2>&1 \
-        && c_ok "$2 updated (restart Claude Code to apply)" \
-        || c_warn "$2 update failed — try: claude plugin update $1"
+    if claude plugin update "$1" >/dev/null 2>&1; then
+        c_ok "$2 updated (restart Claude Code to apply)"
+        return 0
+    fi
+    c_warn "$2 update failed — try: claude plugin update $1"
+    return 1
 }
 
 uninstall_plugin() {   # uninstall_plugin <name@marketplace> <label>
@@ -2856,6 +2863,48 @@ wire_tool_cmd() {      # wire/unwire only apply to the project-scoped MCP tools
 }
 
 # ---------------------------------------------------------------------------
+# Managed workers are provider-agnostic: restarting them never changes a
+# provider, model, credential, or other Claude-mem configuration.
+restart_memory() {
+    hdr "Restarting claude-mem worker"
+    if ! cm_installed; then
+        c_warn "claude-mem is not installed — run: agent-tools install-machine"
+        return 0
+    fi
+    if ! have npx; then
+        c_bad "npx is not on PATH — cannot control the claude-mem worker"
+        return 1
+    fi
+    c_warn "stopping worker..."
+    npx claude-mem stop >/dev/null 2>&1 && c_ok "worker stopped" \
+        || c_warn "no worker confirmed stopped — continuing with start"
+    c_warn "starting worker..."
+    if ! npx claude-mem start >/dev/null 2>&1; then
+        c_bad "worker start failed — try: npx claude-mem start"
+        return 1
+    fi
+    c_ok "worker start requested"
+    c_warn "checking worker health..."
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if cm_active; then c_ok "worker responding"; return 0; fi
+        [ "$attempt" = 5 ] || c_warn "worker not ready yet (attempt $attempt/5)..."
+        sleep 1
+    done
+    c_bad "worker did not respond after 5 seconds — run: npx claude-mem status"
+    return 1
+}
+
+restart_cmd() {
+    local what="${1:-all}"
+    case "$what" in
+      all) hdr "Restarting all managed services"; c_warn "1 managed service: claude-mem"; restart_memory ;;
+      claude-mem|memory) restart_memory ;;
+      *) c_bad "usage: agent-tools restart <claude-mem|memory|all>"; return 2 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Updating. Each component updates differently and some have footguns, so a
 # single command is safer than asking people to remember four incantations.
 #
@@ -2894,10 +2943,11 @@ update_cmd() {
           claude-mem)
             if have claude && plugin_installed "claude-mem@thedotmack"; then
                 c_warn "updating claude-mem through the Claude Code marketplace..."
-                update_plugin "claude-mem@thedotmack" "claude-mem"
-                npx claude-mem start >/dev/null 2>&1 \
-                    && c_ok "worker restarted" \
-                    || c_warn "start the worker yourself: npx claude-mem start"
+                if update_plugin "claude-mem@thedotmack" "claude-mem"; then
+                    restart_memory
+                else
+                    c_warn "worker left untouched because the update failed"
+                fi
             else c_warn "claude-mem plugin not installed — run: agent-tools install-machine"; fi ;;
           none) c_warn "no memory backend selected" ;;
         esac
@@ -4454,6 +4504,7 @@ case "${1:-help}" in
     wire)              shift; wire_tool_cmd wire "$@" ;;
     unwire)            shift; wire_tool_cmd unwire "$@" ;;
     update|upgrade)    shift; update_cmd "$(first_nonflag "$@")" ;;
+    restart)           shift; restart_cmd "$(first_nonflag "$@")" ;;
     migrate)           shift; migrate_cmd "${1:-}" "${2:-}" ;;
     init)              init_project ;;
     refresh)           shift; refresh "$@" ;;

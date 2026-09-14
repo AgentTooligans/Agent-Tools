@@ -28,6 +28,7 @@
   agent-tools doctor
   agent-tools init
   agent-tools refresh
+  agent-tools restart all
   agent-tools install rtk
   agent-tools -Wsl doctor        # force the WSL path
   agent-tools install-machine -y

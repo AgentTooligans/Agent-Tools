@@ -27,7 +27,7 @@ agent-tools update tools        # only the optional tools.
 
 ```bash
 agent-tools update graphify
-agent-tools update memory       # claude-mem + restart its worker
+agent-tools update memory       # claude-mem + a visible, health-checked restart
 agent-tools update rtk
 agent-tools update caveman      # plugin + global skills
 agent-tools update pocock       # grill-me / grilling / handoff / wait-what
@@ -116,7 +116,7 @@ agent-tools refresh       # rebuild; re-extracts only what the cache missed
 
 ```bash
 claude plugin update claude-mem@thedotmack --scope user
-npx claude-mem start                 # restart the worker afterwards
+agent-tools restart memory            # provider-agnostic worker restart
 ```
 
 Its store (`~/.claude-mem/claude-mem.db` + Chroma index) is untouched by an

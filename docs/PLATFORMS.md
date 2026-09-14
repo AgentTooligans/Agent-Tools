@@ -94,8 +94,8 @@ existed to pin one working directory for a backend that no longer ships.
 What remains is claude-mem's worker, started by you or by your shell profile:
 
 ```bash
-npx claude-mem start
-agent-tools doctor        # checks :37701 and prints the fix
+agent-tools restart memory # provider-agnostic stop, start, and health check
+agent-tools doctor         # checks :37701 and prints the restart command
 ```
 
 `loginctl enable-linger` and `systemd=true` in `/etc/wsl.conf` are no longer

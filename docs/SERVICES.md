@@ -38,6 +38,19 @@ curl -s localhost:37701   # raw check
 agent-tools doctor        # checks :37701 and names the fix
 ```
 
+Agent-tools provides the portable lifecycle command:
+
+```bash
+agent-tools restart claude-mem  # stop, start, then wait for a health check
+agent-tools restart memory      # alias for claude-mem
+agent-tools restart all         # every managed service (currently claude-mem)
+```
+
+It prints each lifecycle stage and never changes Claude-mem's provider,
+model, credentials, or store. `all` is intentionally honest: today
+claude-mem is the only managed background worker; graphify runs on demand and
+plugins/hooks do not have restartable services.
+
 `agent-tools doctor` reports the worker under **Memory backend**. If you only
 ever run one command from this page, run that one.
 

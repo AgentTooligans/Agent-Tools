@@ -89,6 +89,25 @@ out="$(run help)"
 check "2d help mentions install-machine" $(has "$out" 'install-machine' && echo 0 || echo 1)
 check "2e unknown command exits 2" "$([ "$(run_code no-such-command)" = 2 ] && echo 0 || echo 1)"
 
+# Managed-service lifecycle is exercised with fake npx/curl commands, so it
+# never contacts a provider or the real worker.
+mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.claude-mem"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$*" >> "$HOME/restart.log"' 'exit 0' > "$FAKE_HOME/.local/bin/npx"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$FAKE_HOME/.local/bin/curl"
+chmod +x "$FAKE_HOME/.local/bin/npx" "$FAKE_HOME/.local/bin/curl"
+printf '%s\n' '{"pid":1,"port":37701}' > "$FAKE_HOME/.claude-mem/worker.pid"
+out="$(run restart memory)"
+check "2f restart memory shows stop" $(has "$out" 'stopping worker' && echo 0 || echo 1) "$out"
+check "2g restart memory shows start" $(has "$out" 'starting worker' && echo 0 || echo 1) "$out"
+check "2h restart memory confirms health" $(has "$out" 'worker responding' && echo 0 || echo 1) "$out"
+out="$(run doctor)"
+check "2h2 doctor explains the restart command" $(has "$out" 'agent-tools restart memory' && echo 0 || echo 1) "$out"
+check "2i restart calls stop and start" \
+    $(grep -qx 'claude-mem stop' "$FAKE_HOME/restart.log" && grep -qx 'claude-mem start' "$FAKE_HOME/restart.log" && echo 0 || echo 1)
+out="$(run restart all)"
+check "2j restart all names its current service" $(has "$out" '1 managed service: claude-mem' && echo 0 || echo 1) "$out"
+check "2k restart rejects an unknown service" "$([ "$(run_code restart unknown)" = 2 ] && echo 0 || echo 1)"
+
 # ---------------------------------------------------------------------------
 # 3. Tool-name resolution, including the aliases people actually type.
 # ---------------------------------------------------------------------------

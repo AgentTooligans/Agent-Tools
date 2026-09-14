@@ -35,7 +35,7 @@ installed. See [TOOLS.md](TOOLS.md#memory--one-capturer-always).
 |---|---|
 | store | `~/.claude-mem/` — SQLite + Chroma vectors, **absolute path** |
 | store override | `CLAUDE_MEM_DATA_DIR` (honored) |
-| service | worker on :37701 via `npx claude-mem start`; **no launchd/systemd unit** |
+| service | worker on :37701; restart with `agent-tools restart memory`; **no launchd/systemd unit** |
 | context injection | **automatic**, from your second session in a project |
 | ingest past sessions | no bulk importer; ships `/learn-codebase` for a repo |
 | export to Markdown | yes (`agent-tools memory export`, reads its SQLite read-only) |

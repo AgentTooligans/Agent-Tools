@@ -300,6 +300,19 @@ Check "13d backticks are not executed" ($r.Output -match '`bt`') $r.Output
 Check "13e quote-break injection is neutralised" ($r.Output -match "''\\''; id #'") $r.Output
 Check "13f semicolon does not split the command" ($r.Output -match "'x;rm -rf /'") $r.Output
 
+# Restart commands are ordinary arguments: the wrapper must relay both the
+# target and `all` unchanged to Git Bash, where the provider-agnostic lifecycle
+# logic lives.
+Reset-Env
+$env:ProgramFiles = "$ENVDIR/pf"
+$r = Invoke-Target @('restart','all')
+Check "13g restart all reaches Git Bash unchanged" ($r.Output -match "agent-tools 'restart' 'all'") $r.Output
+Reset-Env
+$env:PATH = "$ENVDIR/bin:/usr/bin:/bin"
+$env:STUB_DISTROS = 'Ubuntu'
+$r = Invoke-Target @('restart','memory') -ForceWsl
+Check "13h restart memory reaches WSL unchanged" ($r.Output -match "agent-tools 'restart' 'memory'") $r.Output
+
 # ---------------------------------------------------------------------------
 # 14. Git Bash probe fires before running, exactly like the WSL branch.
 # ---------------------------------------------------------------------------
