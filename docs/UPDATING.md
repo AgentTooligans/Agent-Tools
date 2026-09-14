@@ -68,7 +68,7 @@ and why it is not just "install latest".
 | component | update | must restart after? |
 |---|---|---|
 | graphify | `uv tool install "graphifyy[gemini,mcp]" --with "mcp<2" --force` | no |
-| claude-mem | `npx -y claude-mem@latest install` | **yes** — the worker |
+| claude-mem | `claude plugin update claude-mem@thedotmack --scope user` | **yes** — the worker |
 | caveman | `npx -y github:JuliusBrussee/caveman --force` | **yes** — your agent session |
 | pocock | `npx -y skills update <name> -g -y` (once per skill) | **yes** — your agent session |
 | rtk | `brew upgrade rtk` / re-run its `install.sh` / `cargo install --git … --force` | **yes** — hooks load at session start |
@@ -115,7 +115,7 @@ agent-tools refresh       # rebuild; re-extracts only what the cache missed
 ## claude-mem
 
 ```bash
-npx -y claude-mem@latest install     # upgrade in place
+claude plugin update claude-mem@thedotmack --scope user
 npx claude-mem start                 # restart the worker afterwards
 ```
 

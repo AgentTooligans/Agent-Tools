@@ -1588,8 +1588,10 @@ uninstall_rtk() {
 # per-invocation, so it cannot go stale within a run that changes nothing.
 plugin_installed() {   # plugin_installed <name@marketplace>
     have claude || return 1
-    plugin_list_cached 2>/dev/null | grep -q "^  ❯ $1$" && return 0
-    plugin_list_cached 2>/dev/null | grep -qF "$1"
+    # Do not use grep -q here: with pipefail enabled it exits before
+    # plugin_list_cached finishes writing, and its SIGPIPE reads as failure.
+    plugin_list_cached 2>/dev/null | grep "^  ❯ $1$" >/dev/null && return 0
+    plugin_list_cached 2>/dev/null | grep -F "$1" >/dev/null
 }
 
 # Say something true when --project meets a plugin that is ALREADY installed
@@ -2890,14 +2892,13 @@ update_cmd() {
         hdr "memory backend ($MEMORY_BACKEND)"
         case "$MEMORY_BACKEND" in
           claude-mem)
-            if node_ok; then
-                c_warn "updating claude-mem via npx (can take a minute — not stuck)..."
-                npx -y claude-mem@latest install --runtime worker </dev/null >/dev/null 2>&1 \
-                    && c_ok "claude-mem updated" || c_bad "claude-mem update failed"
+            if have claude && plugin_installed "claude-mem@thedotmack"; then
+                c_warn "updating claude-mem through the Claude Code marketplace..."
+                update_plugin "claude-mem@thedotmack" "claude-mem"
                 npx claude-mem start >/dev/null 2>&1 \
                     && c_ok "worker restarted" \
                     || c_warn "start the worker yourself: npx claude-mem start"
-            else c_warn "needs Node >= $NODE_MIN — skipping"; fi ;;
+            else c_warn "claude-mem plugin not installed — run: agent-tools install-machine"; fi ;;
           none) c_warn "no memory backend selected" ;;
         esac
     fi
